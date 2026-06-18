@@ -41,6 +41,12 @@ re-deriving context.
 - `quarters.py` — Quarters Theory cycles (day + 90m), Q2 true-open fair value.
 - `feeds/` — `mt5feed.py` (local terminal, near-zero lag, preferred live) and
   `twelvedata.py` (cloud REST; historical fetch + fallback live poller).
+- `svp/` — **standalone** Session Volume Profile "Edge Rotation" strategy (parallel
+  to ORB, off by default, `--strategy svp`, magic 20260620). `profile.py` builds the
+  POC/VAH/VAL/HVN/LVN histogram (tick-volume TPO even-split); `strategy.py`
+  (`SvpEngine`) fades VAH/VAL→POC on balanced days + LVN breaks; `sizing.py` sizes
+  structural-stop trades to 5% risk. **v1 not yet profitable on volume-less history
+  (TPO proxy) — research/tuning stage, not live-ready. See D-015.**
 
 ## Second brain (`macro/`, sidecar)
 - Separate local process (own deps allowed) that fetches macro/fundamental data
@@ -66,6 +72,10 @@ re-deriving context.
 - Live (full ruleset): `python -m orb live --broker mt5 --qty 0.05 --entry limit
   --stop-min 2 --stop-max 4 --roc-min 0.15 --spike-cancel 2.5 --max-daily-loss 110
   --tp-rrr 2 --session-len 1440 --rearm --rearm-range rebuild --trueopen-filter deadzone`
+- SVP (research, demo only when ready): `python -m orb live --strategy svp --source
+  orb.feeds.mt5feed:xauusd_live --broker mt5 --symbol XAUUSD.ecn --max-daily-loss 110`.
+  Backtest (TPO profile on volume-less CSVs): `python scripts/sim_realistic.py
+  data/xauusd_1m_*.csv --strategy svp`.
 - Backtests: `python -m orb replay <csv>`; realistic execution sim (limit fills,
   babysitter, spread+commission): `python scripts/sim_realistic.py data/*.csv`;
   filter studies: `python scripts/backtest_trueopen.py`.
@@ -79,7 +89,7 @@ re-deriving context.
   (or `sim_realistic.py ... --emit-trades`) dumps entry trades; then
   `python scripts/backtest_macro.py --trades trades.json --events calendar.json`
   reports PF before/after the macro filter per symbol.
-- Tests: `pytest` (185 passing).
+- Tests: `pytest` (226 passing).
 
 ## Constraints
 - Keep secrets out of version control (`.env` untracked).

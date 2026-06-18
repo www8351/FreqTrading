@@ -1,5 +1,59 @@
 # DECISIONS
 
+## D-015 — SVP "Edge Rotation" as a standalone parallel strategy module (accepted)
+- **Date:** 2026-06-19
+- **Decision (owner-approved):** Build Session Volume Profile (SVP) as a NEW,
+  standalone `orb/svp/` package — its own profile engine (`profile.py`/`levels.py`),
+  Edge-Rotation state machine (`strategy.py` `SvpEngine`), config (`config.py`),
+  and dynamic sizer (`sizing.py`). It trades the SAME XAUUSD feed but with a
+  DISTINCT magic `SVP_MAGIC=20260620`, so `Mt5Broker.my_positions()` + the
+  babysitter scope to SVP tickets only and it can run alongside ORB. **ORB engine
+  is never modified** — wired via an additive `--strategy {orb,svp}` flag (default
+  orb) + one additive broker method `symbol_specs()`. Off by default, backtest-first
+  (mirrors the macro sidecar pattern, D-013).
+- **Owner decisions (locked):** (1) standalone parallel module, distinct magic, no
+  logic mixing with ORB; (2) volume = MT5 **tick volume** proxy, TPO-style even-split
+  of each M1 bar across its [low,high] rows (stdlib, O(rows/bar)); (3) **pure
+  structural stops** (beyond HVN/VAH/VAL, NO ATR/iron-band clamp) + **dynamic sizing**
+  — lot shrinks so risk-per-trade ≈ `risk_pct` (5%) for the actual stop distance,
+  additionally capped to the remaining daily-loss budget (`compute_lot`).
+- **v1 scope:** Edge Rotation (fade VAH/VAL → POC, D-shape only); LVN break (behind
+  `--svp-enable-lvn`); directionless absorption proxy (behind `--svp-enable-absorption`).
+  **Deferred (v2):** true Delta-divergence absorption — MT5 tick volume is UNDIRECTED
+  (no bid/ask aggressor split), so true delta is NOT computable from the feed; and an
+  SVP-specific POC-target exit (v1 reuses the babysitter 70%@2R + chase).
+- **Key fix found in build:** detection must use the profile levels ESTABLISHED
+  before the current bar — using the post-update developing VA lets a spiking bar
+  extend VAH to contain itself, so the "tag edge + close inside" rejection could
+  never fire (0 trades until fixed).
+- **Data caveat:** the historical CSVs in `data/` carry NO tick volume (Twelve Data
+  XAU volume = 0, see D-005). Backtests therefore build the profile from time-at-price
+  (TPO, `tpo_fallback=True`, default for `run_svp`); LIVE uses real MT5 tick volume
+  (`tpo_fallback` off). A true volume-based backtest needs an MT5 tick-volume history dump.
+- **Backtest verdict (HONEST, on TPO-proxy data):** the default config is
+  **profitable on the 14-week TPO backtest — PF 1.61, +$3,778, n=80, win 25%,
+  maxDD $3,210** (`sim_realistic.py --strategy svp` on all `data/xauusd_1m_*.csv`).
+  The structural buffer is the dominant lever: the original $0.08 buffer stopped out
+  nearly every fade (PF 0.00–0.74), so the default `stop_buffer_ticks` was raised
+  8→50 ($0.50 for gold) — single change, PF 0.74→1.61. **Caveats that block a live
+  call:** (a) this is a TPO time-at-price proxy, NOT real tick volume; (b) the edge is
+  ASYMMETRIC and regime-bound — VAH-fade shorts PF 2.52 (+$4,756) carry it, VAL-fade
+  longs LOSE (PF 0.68, −$978) because the window was a gold downtrend (longs at VAL
+  catch falling knives; matches the ORB "SHORT-in-discount only profitable" finding);
+  (c) maxDD ($3.2k) exceeds the sim's starting balance — sizing is aggressive and the
+  daily breaker fires often; (d) one regime only. NEXT before any live use: real
+  tick-volume history, the v2 POC-target exit (the 2R-partial/trail babysitter is
+  mismatched to mean reversion), a directional/regime filter, per-instrument tuning.
+- **Rejected alternatives:** (a) SVP as a confluence filter on ORB only — under-delivers
+  the Edge-Rotation strategy the owner asked for; (b) replacing ORB for gold — discards
+  a proven live edge; (c) sourcing GC-futures real volume — new feed + alignment, large
+  added scope; (d) clamping SVP stops to the ORB iron bands — owner chose pure structural.
+- **Status:** Engine COMPLETE + wired + off by default. **226 tests green** (185 ORB/macro
+  + 41 SVP: profile/sizing/strategy/cli). Plan: `~/.claude/plans/c-users-www83-onedrive-
+  desktop-brain-sv-giggly-hoare.md`. NEXT (research, owner-paced): fetch MT5 tick-volume
+  history → re-backtest on real volume; build the v2 POC-target exit; tune buffer/rows;
+  only then consider a demo run (`--strategy svp`, magic 20260620, alongside ORB).
+
 ## D-013 — Fundamental "second brain" as a separate local sidecar (accepted)
 - **Date:** 2026-06-16 (accepted 2026-06-17)
 - **Decision (accepted 2026-06-17):** Implement the macro/fundamental

@@ -1,6 +1,51 @@
 # STATUS
 
-_Last updated: 2026-06-18_
+_Last updated: 2026-06-19_
+
+## 2026-06-19 — SVP "Edge Rotation" engine BUILT (standalone, off by default)
+- New `orb/svp/` package: `profile.py` (POC/VAH/VAL/HVN/LVN + D/P/b/B/I shapes,
+  incremental TPO even-split), `levels.py`, `strategy.py` (`SvpEngine` Edge Rotation),
+  `config.py` (`SvpConfig`), `sizing.py` (`compute_lot` structural-stop dynamic sizing).
+  Distinct magic **SVP_MAGIC=20260620**; babysitter owns exits. **ORB untouched** — wired
+  via additive `--strategy {orb,svp}` (default orb) + one additive `Mt5Broker.symbol_specs()`.
+  See **D-015**. **226 tests green** (was 185; +41 SVP).
+- v1 setups: Edge Rotation (fade VAH/VAL→POC, D-shape) on by default; LVN break
+  (`--svp-enable-lvn`) and absorption proxy (`--svp-enable-absorption`) off. True
+  delta-absorption DEFERRED — MT5 tick volume is undirected (can't compute delta).
+- **Backtest result (TPO proxy — promising, NOT live-ready):** historical CSVs have
+  **0 tick volume** (D-005), so backtests use a TPO time-at-price profile
+  (`tpo_fallback`, default in `run_svp`). On 14wk the default config is **profitable:
+  PF 1.61, +$3,778, n=80, win 25%, maxDD $3,210**. The structural buffer was the lever
+  (old $0.08 buffer = PF 0.74; raised default 8→50 ticks / $0.50 → PF 1.61). BUT the
+  edge is **asymmetric/regime-bound**: VAH-fade shorts PF 2.52 (+$4,756) carry it,
+  VAL-fade longs LOSE (PF 0.68, −$978) in this downtrend window; and maxDD ($3.2k)
+  exceeds the sim start balance.
+- **NEXT (research, owner-paced) — do NOT go live on SVP yet:** (1) fetch an MT5
+  **tick-volume** history dump (`scripts/fetch_mt5_history.py`) → re-backtest on REAL
+  volume (the only true test — TPO ≠ volume); (2) build the **v2 POC-target exit** (the
+  2R-partial/trail babysitter is mismatched to mean reversion); (3) add a directional/
+  regime filter (longs lose in downtrends) + per-instrument tuning; (4) only after a
+  positive real-volume backtest, demo-run `--strategy svp` (magic 20260620) alongside ORB.
+- Run (demo, when ready): `python -m orb live --strategy svp --source
+  orb.feeds.mt5feed:xauusd_live --broker mt5 --symbol XAUUSD.ecn --max-daily-loss 110`.
+  Backtest now: `python scripts/sim_realistic.py data/xauusd_1m_*.csv --strategy svp`.
+- The live ORB bots (XAUUSD + US100, D-014) are UNAFFECTED by this work.
+
+## 2026-06-18 (pm-2) — "no trades yet" = mid-session launch, NOT a bug; WAIT chosen
+- XAUUSD + US100 bots HEALTHY (feed live, bars flowing, 1 bot/symbol confirmed via
+  parent-PID). No trades because the 14:26-local (11:26 UTC) restart landed
+  mid-session: opening-range window is [00:00,00:05) UTC (default `session_open_utc`
+  00:00 + `range_minutes` 5), so engine sits IDLE (`_on_idle` only builds range in
+  IN_RANGE_WINDOW). No `--session-open` passed; live has no `auto` derive.
+- OWNER DECISION: WAIT — no restart, no code change. At 00:00 UTC `session_id` rolls,
+  `_reset_for_new_session` fires, range builds 00:00–00:05, bots trade on-spec from
+  there. Today (~11h) is a no-trade day by design of the mid-session start.
+- NEXT BEST ACTION: nothing required; verify trading resumed after 00:00 UTC (check
+  `live_signals.log` / `live_us100_signals.log` grow, or `live_state.py` positions).
+- WATCH-OUT for future restarts: launch BEFORE 00:00 UTC (or at market open), else
+  the day's range is missed again. Optional later fix: add `--session-open auto` to
+  live mode (cli.py cmd_live, mirror replay:162) so any restart builds range at once.
+- Stray `pythonw` pid 21680 (6/13, no --symbol) still present — old leftover, harmless.
 
 ## 2026-06-18 (pm) — Live-bot incident fixed + ops tooling (universe = XAU + US100)
 - ROOT CAUSE of "no trades since 6/15": terminal restarted 6/16 → dead python↔terminal

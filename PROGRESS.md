@@ -1,5 +1,68 @@
 # PROGRESS
 
+## 2026-06-19 — SVP "Edge Rotation" engine built (standalone `orb/svp/`, off by default)
+- Owner asked for a production-ready Session Volume Profile engine for gold (per
+  `Brain_SVP.md` + the SVP research PDF). Ran the pre-computation/compatibility
+  analysis first (no ORB volume-profile code existed; 6 tensions surfaced), got owner
+  decisions, then built per the approved plan (`~/.claude/plans/...giggly-hoare.md`).
+- BUILT `orb/svp/`: `profile.py` (incremental price→tick-volume histogram; even-split
+  TPO distribution; POC argmax; recursive 70% Value Area with two-up-vs-two-down
+  expansion + tie-break; HVN/LVN peak/valley detection; D/P/b/B/I shape classifier),
+  `levels.py` (frozen `ProfileLevels` + `PriorProfile` carryover + `Shape`),
+  `strategy.py` (`SvpEngine` — sibling of `OrbEngine`, reuses `State`/`SessionClock`;
+  Edge Rotation fade VAH/VAL→POC on D-shape, LVN break, absorption proxy),
+  `config.py` (`SvpConfig`), `sizing.py` (`compute_lot` structural-stop dynamic sizing).
+- WIRED additively: `--strategy {orb,svp}` (default orb) + `build_svp_config` in
+  `cli.py`; SVP sizing injected at `on_signal` (lot capped to remaining daily budget,
+  skip if 0); babysitter reused for SVP market entries; one new `Mt5Broker.symbol_specs()`.
+  Distinct magic `SVP_MAGIC=20260620`. **ORB path byte-unchanged.** See D-015.
+- TESTS: +41 SVP cases (profile math vs hand-computed fixtures, sizing, strategy
+  transitions, cli/broker). **226 green** (was 185), zero regressions.
+- WHAT WORKED: the engine arms, profiles, signals, sizes, executes, babysits, and
+  backtests end-to-end. Reused `State`/`SessionClock`/`PositionState`/`Signal`/
+  `Babysitter`/`DailyLossBreaker` — no model changes.
+- WHAT DIDN'T (yet): first backtest = 0 trades. Bug found: detection used the
+  POST-update developing VA, so a bar spiking through VAH also extended VAH to contain
+  itself → "tag + close inside" could never fire. Fixed: detect against the levels
+  ESTABLISHED before the bar. Then: still 0 trades — the historical CSVs carry **0 tick
+  volume** (D-005). Added a TPO `tpo_fallback` (weight 1/bar when no volume) for
+  backtests; live uses real MT5 tick volume.
+- BACKTEST (TPO proxy, 14wk, all `data/xauusd_1m_*.csv`): the default config is
+  **profitable — PF 1.61, +$3,778, n=80, win 25%, maxDD $3,210**. The structural buffer
+  was the dominant lever: the original $0.08 buffer stopped out nearly every fade
+  (PF 0.00–0.74); raising the default `stop_buffer_ticks` 8→50 ($0.50) alone took PF
+  0.74→1.61. Did NOT curve-fit beyond that one default fix. CAVEATS: edge is asymmetric/
+  regime-bound — VAH-fade SHORTS carry it (PF 2.52, +$4,756), VAL-fade LONGS lose
+  (PF 0.68, −$978) in this gold-downtrend window (matches the ORB "SHORT-in-discount
+  only profitable" finding); maxDD ($3.2k) exceeds the sim start balance; and it's TPO,
+  not real tick volume.
+- NEXT: fetch MT5 tick-volume history → re-backtest on REAL volume (TPO ≠ volume); build
+  v2 POC-target exit; add a directional/regime filter (longs lose in downtrends); tune
+  per instrument; only then a demo `--strategy svp` run alongside ORB. **Not live yet.**
+
+## 2026-06-18 (pm-2) — "no trades yet" diagnosed: mid-session launch, NOT a bug
+- Owner asked why bots (XAUUSD + US100) had no trades since the 14:26 local restart.
+- Investigated systematically. NOT feed/IPC: `live_state.py` shows live bids
+  (gold 4249, US100 30227); `tick_age=-10801s` is exactly the +3h broker offset
+  (live_state reads raw broker-time tick, doesn't subtract offset) → measurement
+  artifact, market IS live. Gold `live_engine.log` grew (riskguard momentum_spike)
+  → bars flowing to engine. US100 engine log silent (no spike fired).
+- ROOT CAUSE: launch TIMING. Default `session_open_utc=00:00` UTC, `range_minutes=5`
+  → opening-range window = [00:00,00:05) UTC (`orb/session.py` classify). Bots
+  restarted 14:26 local = 11:26 UTC, mid-session → `info.zone=IN_SESSION` →
+  `engine._on_idle` no-ops (only builds range in `IN_RANGE_WINDOW`) → engine stuck
+  IDLE, no range → no breakout → no trades. No `--session-open` passed; live mode
+  has no `auto` derive (only replay, cli.py:162). Explains zero transitions logged.
+- Confirmed bots are HEALTHY: parent-PID check (18856←19956 gold, 14584←21708 US100)
+  = alias→child = ONE bot each, NOT duplicates. STATUS's "2 procs/symbol = 1 bot"
+  correct.
+- DECISION (owner): WAIT. At 00:00 UTC `session_id` rolls → `_reset_for_new_session`
+  → range builds 00:00–00:05 → bots trade on-spec from there. No restart, no code
+  change. Only today (~11h) lost; tomorrow on the backtested 00:00 session.
+- Rejected (owner): restart with near-now `--session-open` (would trade today but
+  build the opening range at an off-spec mid-day minute); permanent `--session-open
+  auto` for live (deferred, same off-spec risk). Revisit if recurring.
+
 ## 2026-06-18 (pm) — blind-feed incident + bot ops tooling
 - Diagnosed "no trades since 6/15": MT5 terminal restarted 6/16 → python↔terminal IPC
   dead (`-10001 IPC send failed`) every poll, all 4 bots blind ~2 days; signal logs

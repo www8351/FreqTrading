@@ -107,6 +107,26 @@ class Mt5Broker:
             raise BrokerError("account_info returned None")
         return float(acct.balance)
 
+    def symbol_specs(self) -> dict:
+        """Contract specs for dynamic position sizing (read-only).
+
+        ``value_per_move`` = trade_tick_value / trade_tick_size ($ per 1.0 price
+        move per lot). Mirrors scripts/symbol_specs.py:72-89.
+        """
+        info = self._mt5.symbol_info(self.symbol)
+        if info is None:
+            raise BrokerError(f"symbol_info({self.symbol}) returned None")
+        tick_value = getattr(info, "trade_tick_value", 0.0) or 0.0
+        tick_size = getattr(info, "trade_tick_size", 0.0) or 0.0
+        return {
+            "tick_size": tick_size,
+            "tick_value": tick_value,
+            "value_per_move": (tick_value / tick_size) if tick_size else 0.0,
+            "volume_min": getattr(info, "volume_min", 0.01) or 0.01,
+            "volume_step": getattr(info, "volume_step", 0.01) or 0.01,
+            "volume_max": getattr(info, "volume_max", 100.0) or 100.0,
+        }
+
     def close_all(self, reason: str = "risk_halt") -> dict | None:
         """Market-close every position this adapter owns (by magic)."""
         result = None

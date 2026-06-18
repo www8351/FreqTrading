@@ -23,6 +23,7 @@ from datetime import datetime, time, timezone
 from .engine import OrbEngine
 from .models import (Candle, CandleError, OrbConfig, OrbError, OutOfOrderError,
                      Signal, State)
+from .svp import SVP_MAGIC, SvpConfig, SvpEngine, compute_lot
 
 
 # --------------------------------------------------------------------------- #
@@ -154,6 +155,39 @@ def build_config(args) -> OrbConfig:
     return OrbConfig(**base)
 
 
+def build_svp_config(args) -> SvpConfig:
+    """Assemble an SvpConfig from --svp-* flags (only used with --strategy svp)."""
+    base: dict = {}
+
+    def setif(key, val):
+        if val is not None:
+            base[key] = val
+
+    setif("session_len_min", args.session_len)
+    setif("ticks_per_row", getattr(args, "svp_ticks_per_row", None))
+    setif("tick_size", getattr(args, "svp_tick_size", None))
+    setif("value_area_pct", getattr(args, "svp_va_pct", None))
+    setif("hvn_frac", getattr(args, "svp_hvn_frac", None))
+    setif("lvn_frac", getattr(args, "svp_lvn_frac", None))
+    setif("risk_pct", getattr(args, "svp_risk_pct", None))
+    setif("min_session_bars", getattr(args, "svp_min_bars", None))
+    setif("stop_buffer_ticks", getattr(args, "svp_buffer_ticks", None))
+    if getattr(args, "svp_enable_lvn", False):
+        base["enable_lvn"] = True
+    if getattr(args, "svp_enable_absorption", False):
+        base["enable_absorption_proxy"] = True
+    if getattr(args, "svp_tpo_fallback", False):
+        base["tpo_fallback"] = True
+    if args.long_only:
+        base["allow_short"] = False
+    if args.short_only:
+        base["allow_long"] = False
+    if args.session_open:
+        hh, mm = args.session_open.split(":")
+        base["session_open_utc"] = time(int(hh), int(mm))
+    return SvpConfig(**base)
+
+
 # --------------------------------------------------------------------------- #
 # Commands
 # --------------------------------------------------------------------------- #
@@ -242,7 +276,9 @@ def cmd_live(args) -> int:
     from .stream import CandleStream
 
     cfg = build_config(args)
-    dp = cfg.instrument_dp
+    is_svp = getattr(args, "strategy", "orb") == "svp"
+    svp_cfg = build_svp_config(args) if is_svp else None
+    dp = svp_cfg.instrument_dp if is_svp else cfg.instrument_dp
     mod_name, _, factory = args.source.partition(":")
     if not factory:
         print("FATAL | --source must be 'module:factory'", file=sys.stderr)
@@ -302,12 +338,14 @@ def cmd_live(args) -> int:
         from .broker import Mt5Broker
 
         broker = Mt5Broker(symbol=args.symbol,
-                           default_qty=cfg.qty or 0.01,
+                           default_qty=0.01 if is_svp else (cfg.qty or 0.01),
                            allow_live=args.live,
-                           server_tp=cfg.tp_close_frac >= 1.0,
-                           entry_mode=args.entry)
+                           magic=SVP_MAGIC if is_svp else 20260610,
+                           server_tp=False if is_svp else (cfg.tp_close_frac >= 1.0),
+                           entry_mode="market" if is_svp else args.entry)
         info = broker.connect()
-        print(f"# broker mt5 {info}", file=sys.stderr)
+        print(f"# broker mt5 {info} magic={broker.magic} "
+              f"strategy={'svp' if is_svp else 'orb'}", file=sys.stderr)
 
     def on_transition(tr):
         if not args.quiet:
@@ -355,6 +393,29 @@ def cmd_live(args) -> int:
                 else:
                     print(f"# MACRO_SHADOW would_scale qty {sig.qty}->{dec.qty}",
                           file=sys.stderr)
+        if is_svp and sig.kind is SignalKind.ENTRY:
+            # structural-stop dynamic sizing: lot so the loss at the structural
+            # stop is risk_pct of balance, capped to the remaining daily budget.
+            if sig.stop is None:
+                print("# SVP_SKIP no structural stop", file=sys.stderr)
+                return
+            specs = broker.symbol_specs()
+            bal = broker.balance()
+            remaining = None
+            if breaker is not None:
+                remaining = max(0.0, breaker.max_daily_loss + breaker.day_pnl)
+            lot = compute_lot(bal, svp_cfg.risk_pct, sig.price, sig.stop,
+                              specs["value_per_move"], specs["volume_min"],
+                              specs["volume_step"], specs["volume_max"],
+                              max_risk=remaining)
+            stop_dist = abs(sig.price - sig.stop)
+            if lot <= 0:
+                print(f"# SVP_SKIP lot=0 stop_dist={stop_dist:.{dp}f} bal={bal} "
+                      f"budget={remaining}", file=sys.stderr)
+                return
+            sig = dataclasses.replace(sig, qty=lot)
+            print(f"# SVP_SIZE lot={lot} risk={svp_cfg.risk_pct}% "
+                  f"stop_dist={stop_dist:.{dp}f}", file=sys.stderr)
         try:
             res = broker.execute(sig)
             if res is not None:
@@ -362,15 +423,22 @@ def cmd_live(args) -> int:
         except OrbError as e:
             print(f"ORDER_FAIL | {e}", file=sys.stderr)
 
-    engine = OrbEngine(cfg, on_transition=on_transition)
+    if is_svp:
+        engine = SvpEngine(svp_cfg, on_transition=on_transition)
+    else:
+        engine = OrbEngine(cfg, on_transition=on_transition)
 
     sitter = None
-    if broker is not None and broker.entry_mode == "limit":
+    if broker is not None and (broker.entry_mode == "limit" or is_svp):
         from .babysitter import Babysitter
 
-        sitter = Babysitter(partial_frac=cfg.tp_close_frac
-                            if cfg.tp_close_frac < 1.0 else 0.7,
-                            partial_at_r=cfg.tp_rrr or 2.0)
+        if is_svp:
+            sitter = Babysitter(partial_frac=svp_cfg.partial_frac,
+                                partial_at_r=svp_cfg.partial_at_r)
+        else:
+            sitter = Babysitter(partial_frac=cfg.tp_close_frac
+                                if cfg.tp_close_frac < 1.0 else 0.7,
+                                partial_at_r=cfg.tp_rrr or 2.0)
         print(f"# babysitter: {sitter.partial_frac:.0%} off at "
               f"+{sitter.partial_at_r}R, stop chases the rest", file=sys.stderr)
 
@@ -419,8 +487,8 @@ def cmd_live(args) -> int:
                     print("# MACRO_RISK_ON: risk-off cleared", file=sys.stderr)
             except OrbError as e:
                 print(f"MACRO_FAIL | {e}", file=sys.stderr)
-        if broker.entry_mode == "limit":
-            if args.limit_ttl:
+        if broker.entry_mode == "limit" or is_svp:
+            if broker.entry_mode == "limit" and args.limit_ttl:
                 try:
                     n = broker.cancel_expired(int(args.limit_ttl * 60))
                     if n:
@@ -551,6 +619,38 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--entry", choices=("market", "limit"), default="market",
                     help="limit: enter at the liquidity level (old stop spot) "
                          "with one pre-placed add-on toward the SL")
+    lp.add_argument("--strategy", choices=("orb", "svp"), default="orb",
+                    help="orb (default, opening-range breakout) or svp (Session "
+                         "Volume Profile Edge Rotation; market entry, structural "
+                         "stops, dynamic 5%% sizing, magic 20260620)")
+    lp.add_argument("--svp-ticks-per-row", dest="svp_ticks_per_row", type=int,
+                    help="SVP profile row width in ticks (default 10)")
+    lp.add_argument("--svp-tick-size", dest="svp_tick_size", type=float,
+                    help="SVP tick size (default 0.01 = gold)")
+    lp.add_argument("--svp-va-pct", dest="svp_va_pct", type=float,
+                    help="SVP value-area fraction (default 0.70)")
+    lp.add_argument("--svp-hvn-frac", dest="svp_hvn_frac", type=float,
+                    help="SVP HVN threshold as a fraction of max row vol (0.70)")
+    lp.add_argument("--svp-lvn-frac", dest="svp_lvn_frac", type=float,
+                    help="SVP LVN threshold as a fraction of mean row vol (0.30)")
+    lp.add_argument("--svp-risk-pct", dest="svp_risk_pct", type=float,
+                    help="SVP risk per trade as %% of balance (default 5.0)")
+    lp.add_argument("--svp-min-bars", dest="svp_min_bars", type=int,
+                    help="SVP session bars before any entry (default 20)")
+    lp.add_argument("--svp-buffer-ticks", dest="svp_buffer_ticks", type=float,
+                    help="SVP structural-stop buffer beyond the shelf, in ticks "
+                         "(default 50 = $0.50 for gold)")
+    lp.add_argument("--svp-enable-lvn", dest="svp_enable_lvn", action="store_true",
+                    help="SVP: enable LVN break entries (off by default)")
+    lp.add_argument("--svp-enable-absorption", dest="svp_enable_absorption",
+                    action="store_true",
+                    help="SVP: enable the directionless absorption proxy (off; "
+                         "NOT true delta — tick volume is undirected)")
+    lp.add_argument("--svp-tpo-fallback", dest="svp_tpo_fallback",
+                    action="store_true",
+                    help="SVP: build the profile from time-at-price (TPO) when a "
+                         "bar has no tick volume (for volume-less feeds; live "
+                         "mt5feed has tick volume, so leave off)")
     lp.add_argument("--max-daily-loss", dest="max_daily_loss", type=float,
                     help="halt trading for the rest of the UTC day after losing "
                          "this many account-currency units (e.g. 110)")

@@ -100,6 +100,16 @@ class Sim:
             self.pendings.append(Pending(self._ticket, side, px, sl,
                                          self.qty, ts, label, dict(tags)))
 
+    def place_market(self, sig, ts: datetime, lot: float, tags: dict) -> None:
+        """Open a market position immediately (SVP path): fill at the signal
+        close +/- half-spread, SL = the structural stop on the signal."""
+        short = sig.direction is Direction.SHORT
+        fill = sig.price - self.half_spread if short else sig.price + self.half_spread
+        side = SHORT if short else LONG
+        self._ticket += 1
+        self.positions.append(Position(self._ticket, side, lot, fill, sig.stop,
+                                       ts, dict(tags), placed_ts=ts))
+
     # -- per-bar market mechanics ------------------------------------------ #
     def on_bar(self, c: Candle, sitter: Babysitter, spike: bool,
                halted: bool) -> None:
@@ -244,6 +254,51 @@ def run(candles: list[Candle], qty: float, spread: float, comm: float,
     return sim.closed
 
 
+def run_svp(candles: list[Candle], risk_pct: float = 5.0, spread: float = 0.25,
+            comm: float = 7.0, max_daily_loss: float = 110.0,
+            value_per_move: float = USD_PER_LOT_PER_DOLLAR,
+            start_balance: float = 1000.0, vol_min: float = 0.01,
+            vol_step: float = 0.01, vol_max: float = 50.0,
+            tpo_fallback: bool = True, **svp_ov) -> list[dict]:
+    """Execution-true SVP backtest: market entries, structural stops, dynamic
+    5%-risk sizing, babysitter exits (70% at +2R, chase the rest). The new
+    market entry is opened AFTER on_bar so it is never SL-checked on its own bar.
+
+    ``tpo_fallback`` defaults True: the historical CSVs carry no tick volume, so
+    the profile is built from time-at-price (TPO). Live uses real tick volume.
+    """
+    from orb.svp import SvpConfig, SvpEngine, compute_lot
+
+    cfg = SvpConfig(
+        session_open_utc=candles[0].ts.time().replace(second=0, microsecond=0),
+        session_len_min=1440, risk_pct=risk_pct, tpo_fallback=tpo_fallback,
+        **svp_ov,
+    )
+    engine = SvpEngine(cfg)
+    sim = Sim(qty=0.0, spread=spread, commission_rt=comm,
+              value_per_move=value_per_move)
+    sitter = Babysitter(partial_frac=cfg.partial_frac, partial_at_r=cfg.partial_at_r)
+    spike = SpikeCancel(ratio=2.5)
+    breaker = DailyLossBreaker(max_daily_loss)
+
+    for c in candles:
+        sig = engine.on_candle(c)
+        bal = start_balance + sim.equity
+        halted = breaker.update(c.ts.date(), bal)
+        is_spike = spike.update(c.high, c.low)
+        sim.on_bar(c, sitter, is_spike, halted)     # exits for existing positions
+        if (sig is not None and sig.kind is SignalKind.ENTRY and sig.stop
+                and not halted):
+            remaining = max(0.0, max_daily_loss + breaker.day_pnl)
+            lot = compute_lot(bal, cfg.risk_pct, sig.price, sig.stop,
+                              value_per_move, vol_min, vol_step, vol_max,
+                              max_risk=remaining)
+            if lot > 0:
+                sim.place_market(sig, c.ts, lot,
+                                 {"dir": sig.direction.value, "reason": sig.reason})
+    return sim.closed
+
+
 # --------------------------------------------------------------------------- #
 def metrics(trades: list[dict]) -> dict:
     n = len(trades)
@@ -296,6 +351,10 @@ def main() -> None:
                     help="$ per 1.0 lot round-trip")
     ap.add_argument("--symbol", default="XAUUSD",
                     help="symbol tag for emitted trades (default XAUUSD)")
+    ap.add_argument("--strategy", choices=("orb", "svp"), default="orb",
+                    help="orb (default) or svp (Session Volume Profile Edge Rotation)")
+    ap.add_argument("--svp-risk-pct", dest="svp_risk_pct", type=float, default=5.0)
+    ap.add_argument("--svp-enable-lvn", dest="svp_enable_lvn", action="store_true")
     ap.add_argument("--emit-trades", dest="emit_trades",
                     help="write entry trades as JSON for scripts/backtest_macro.py")
     args = ap.parse_args()
@@ -307,6 +366,18 @@ def main() -> None:
     print(f"bars={len(candles)} {candles[0].ts} .. {candles[-1].ts}")
     print(f"costs: spread={args.spread} commission=${args.commission}/lot RT, "
           f"qty={args.qty}\n")
+
+    if args.strategy == "svp":
+        trades = run_svp(candles, risk_pct=args.svp_risk_pct, spread=args.spread,
+                         comm=args.commission, enable_lvn=args.svp_enable_lvn)
+        report("svp edge-rotation", trades)
+        print("\nby setup:")
+        for r in sorted({t["reason"] for t in trades}):
+            report(f"  {r}", [t for t in trades if t["reason"] == r])
+        if args.emit_trades:
+            write_trades_json(trades_to_records(trades, args.symbol),
+                              args.emit_trades)
+        return
 
     trades = run(candles, args.qty, args.spread, args.commission)
 
