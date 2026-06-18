@@ -1,0 +1,751 @@
+//@version=5
+indicator("Sav FX - Semi / Quarterly Cycles", overlay=false, max_boxes_count=500, shorttitle="Sav FX ", max_lines_count=500, max_labels_count=500)
+
+ShowQuadrennialCyles  = input(true, title="Quadrennial Cycles", group="LTF Time Cycles") //6
+ShowYearlyCyles  = input(true, title="Yearly Cycles", group="LTF Time Cycles") //6
+ShowWeeklyCyles  = input(true, title="Weekly Cycles", group="LTF Time Cycles") //6
+showDailyCycles = input(true, title="Daily Cycles", group="LTF Time Cycles") //5
+show6HourCycles = input(true, title=" 6 Hour Cycles", group="LTF Time Cycles") //4
+show90MinIntervals = input(true, title=" 90 Minute ", group="LTF Time Cycles") //3
+show22_5MinIntervals = input(true, title=" 22.5 Minute ", group="LTF Time Cycles") //2
+show5_625MinIntervals = input(true, title=" 5.5 Minute ", group="LTF Time Cycles") //1
+ 
+use_dark_mode = input(false, title="Semi Cycles", group="Display Options")
+show_labels = input(false, title="Show Labels", group="Display Options")
+
+// Color definitions
+color light_q1 = color.rgb(194, 198, 211)
+color light_q2 = color.rgb(220, 195, 200)
+color light_q3 = color.rgb(189, 210, 189)
+color light_q4 = color.rgb(185, 194, 222)
+color light_q5 = color.rgb(227, 228, 230, 100)
+color light_q6 = color.rgb(194, 198, 211)
+color light_q7 = color.rgb(185, 194, 222)
+
+color dark_q1 = color.rgb(185, 194, 222)
+color dark_q2 = color.rgb(194, 198, 211)
+color dark_q3 = color.rgb(185, 194, 222)
+color dark_q4 = color.rgb(194, 198, 211)
+color dark_q5 = color.rgb(230, 230, 230, 97)
+color dark_q6 = color.rgb(185, 194, 222)
+color dark_q7 = color.rgb(194, 198, 211)
+
+// Determine colors based on the selected mode
+q1_color = use_dark_mode ? dark_q1 : light_q1
+q2_color = use_dark_mode ? dark_q2 : light_q2
+q3_color = use_dark_mode ? dark_q3 : light_q3
+q4_color = use_dark_mode ? dark_q4 : light_q4
+q5_color = use_dark_mode ? dark_q5 : light_q5
+q6_color = use_dark_mode ? dark_q6 : light_q6
+q7_color = use_dark_mode ? dark_q7 : light_q7
+
+border_thickness = input.int(1, title="Border Thickness", minval=1, maxval=10, step=1, tooltip="Set the thickness of the border lines.")
+text_size_input = input.string("small", title="Text Size", options=["small", "normal", "large"], group="Display Options")
+
+// Function to determine if the background is dark
+is_dark_background() =>
+    bg = chart.bg_color
+    luma = (0.299 * color.r(bg) + 0.587 * color.g(bg) + 0.114 * color.b(bg)) / 255
+    luma < 0.5
+
+// Input for border color
+border_color_input = is_dark_background() ? #787b86 : color.new(color.black, 10)
+
+// Timeframe check functions
+show5_625MinIntervals_timeframe() =>
+    timeframe.in_seconds() <= 120
+
+show22_5MinIntervals_timeframe() =>
+    timeframe.in_seconds() <= 540
+
+ishow90MinIntervals_timeframe() =>
+    timeframe.in_seconds() <= 2700
+
+is_show6HourCycles_timeframe() => //24 hour
+    timeframe.in_seconds() >= 60 and timeframe.in_seconds() <= 21600
+
+is_DailyRanges_timeframe() =>
+    timeframe.in_seconds() >= 60 and timeframe.in_seconds() <= 43200
+
+is_WeeklyRanges_timeframe() =>
+    timeframe.in_seconds() >= 1800 and timeframe.in_seconds() <= 604800
+
+is_YearlyRanges_timeframe() =>
+    timeframe.in_seconds() >= 21600 and timeframe.in_seconds() <= 10368000
+
+is_QuaternaialCycle_timeframe() =>
+    timeframe.in_seconds() >= 43200 and timeframe.in_seconds() <= 10368000
+
+is_Tertiary_timeframe() =>
+    timeframe.in_seconds() >= 21600 and timeframe.in_seconds() <= 604800
+
+is_225DAY_timeframe() =>
+    timeframe.in_seconds() >= 43200 and timeframe.in_seconds() <= 604800
+
+// Automatically determine the appropriate time zone (UTC-4 or UTC-5) based on the time of year
+is_dst() =>
+    current_year = year(time)
+
+    // Calculate the second Sunday of March
+    march_first = timestamp(current_year, 3, 1, 0, 0)
+    march_day_of_week = dayofweek(march_first)
+    second_sunday_march = 8 + (7 - march_day_of_week + 1) % 7 // Dates 8-14
+
+    // Calculate the first Sunday of November
+    november_first = timestamp(current_year, 11, 1, 0, 0)
+    november_day_of_week = dayofweek(november_first)
+    first_sunday_november = 1 + (7 - november_day_of_week + 1) % 7 // Dates 1-7
+
+    // DST is active if current time is after second Sunday of March and before first Sunday of November
+    time >= timestamp(current_year, 3, second_sunday_march, 2, 0) and time < timestamp(current_year, 11, first_sunday_november, 2, 0)
+
+// Offset the time by 6 hours
+current_time_adjusted = time + 3600000 // 6 hours in milliseconds
+
+    
+is_in_range_90_min(start_hour, start_minute) =>
+    start_time = timestamp(year(current_time_adjusted), month(current_time_adjusted), dayofmonth(current_time_adjusted), start_hour, start_minute, 0)
+    end_time = start_time + 90 * 60 * 1000
+    current_time_adjusted >= start_time and current_time_adjusted < end_time
+
+    
+is_in_range_6_hour(start_hour, start_minute, end_hour, end_minute) =>
+    start_time = timestamp(year(current_time_adjusted), month(current_time_adjusted), dayofmonth(current_time_adjusted), start_hour, start_minute, 0)
+    end_time = timestamp(year(current_time_adjusted), month(current_time_adjusted), dayofmonth(current_time_adjusted), end_hour, end_minute, 0)
+    current_time_adjusted >= start_time and current_time_adjusted < end_time
+
+is_in_range_22_5_min(start_hour, start_minute) =>
+    start_time = timestamp(year(current_time_adjusted), month(current_time_adjusted), dayofmonth(current_time_adjusted), start_hour, start_minute, 0)
+    end_time = start_time + 22.5 * 60 * 1000
+    current_time_adjusted >= start_time and current_time_adjusted < end_time
+
+is_in_range_5_625_min(start_hour, start_minute) =>
+    start_time = timestamp(year(current_time_adjusted), month(current_time_adjusted), dayofmonth(current_time_adjusted), start_hour, start_minute, 0)
+    end_time = start_time + 5.625 * 60 * 1000
+    current_time_adjusted >= start_time and current_time_adjusted < end_time
+
+// Function to calculate dynamic y-position based on visible cycles
+calculate_y_position(cycle_index) =>
+    visible_cycles = array.new_int(0)
+    if ShowQuadrennialCyles
+        array.push(visible_cycles, 4) // Weekly cycles will use index 1
+    if ShowYearlyCyles
+        array.push(visible_cycles, 4) // Weekly cycles will use index 1
+    if ShowWeeklyCyles
+        array.push(visible_cycles, 5) // Weekly cycles will use index 1
+    if showDailyCycles
+        array.push(visible_cycles, 6) // Daily cycles will use index 2
+    if show6HourCycles
+        array.push(visible_cycles, 7) // 6 Hour cycles will use index 3
+    if show90MinIntervals
+        array.push(visible_cycles, 8) // 90 Minute intervals will use index 4
+    if show22_5MinIntervals
+        array.push(visible_cycles, 9) // 22.5 Minute intervals will use index 5
+    if show5_625MinIntervals
+        array.push(visible_cycles, 10) // 5.625 Minute intervals will use index 6
+        
+    
+    array.indexof(visible_cycles, cycle_index) + 1
+
+// Updated projection functions
+// Define quadrennial cycle ranges and apply labels
+cyclerange_quadrennial(start_time, end_time, string textinput, color col) =>
+    int y = calculate_y_position(3)  // Adjusting y-position for quadrennial cycle
+    box.new(start_time, y, end_time, y - 1, bgcolor=col, text = show_labels ? textinput : "", border_color=color.black, xloc=xloc.bar_time, border_style=line.style_solid, border_width = border_thickness, text_size=text_size_input)
+
+// Function to determine the start and end of each quadrennial cycle
+get_quadrennial_start_end(int quadrennial_phase) =>
+    var int quad_start = na
+    var int quad_end = na
+    election_year = 2024  // Next US election year
+
+    if quadrennial_phase == 1
+        quad_start := timestamp("GMT-5", election_year - 1, 1, 1, 0)  // Year before US election
+        quad_end := timestamp("GMT-5", election_year - 1, 12, 31, 23, 59)  // End of the year before election
+    else if quadrennial_phase == 2
+        quad_start := timestamp("GMT-5", election_year, 1, 1, 0)  // US election year
+        quad_end := timestamp("GMT-5", election_year, 12, 31, 23, 59)  // End of election year
+    else if quadrennial_phase == 3
+        quad_start := timestamp("GMT-5", election_year + 1, 1, 1, 0)  // Year after US election
+        quad_end := timestamp("GMT-5", election_year + 1, 12, 31, 23, 59)  // End of year after election
+    else if quadrennial_phase == 4
+        quad_start := timestamp("GMT-5", election_year + 2, 1, 1, 0)  // Two years after US election
+        quad_end := timestamp("GMT-5", election_year + 2, 12, 31, 23, 59)  // End of two years after election
+    [quad_start, quad_end]
+
+// Function to determine the current quadrennial phase
+get_quadrennial_phase() =>
+    current_year = year(time)
+    election_year = 2024  // Set the next US election year
+
+    if current_year == election_year - 1
+        1  // Year before the election
+    else if current_year == election_year
+        2  // US election year
+    else if current_year == election_year + 1
+        3  // Year after the election
+    else if current_year == election_year + 2
+        4  // Two years after the election
+    else
+        na  // No applicable quadrennial phase for other years
+
+// Define quarterly cycle ranges and apply labels
+cyclerange_quarterly(start_time, end_time, string textinput, color col) =>
+    int y = calculate_y_position(4)  // Adjusting y-position for quarterly cycle
+    box.new(start_time, y, end_time, y - 1, bgcolor=col, text = show_labels ? textinput : "", border_color=color.black, xloc=xloc.bar_time, border_style=line.style_solid, border_width = border_thickness, text_size=text_size_input)
+
+// Function to determine the start and end of each quarter
+get_quarter_start_end(int quarter_num) =>
+    var int quarter_start = na
+    var int quarter_end = na
+    if quarter_num == 1
+        quarter_start := timestamp("GMT-5", year(time), 1, 1, 0)  // January 1st
+        quarter_end := timestamp("GMT-5", year(time), 3, 31, 23, 59)  // March 31st
+    else if quarter_num == 2
+        quarter_start := timestamp("GMT-5", year(time), 4, 1, 0)  // April 1st
+        quarter_end := timestamp("GMT-5", year(time), 6, 30, 23, 59)  // June 30th
+    else if quarter_num == 3
+        quarter_start := timestamp("GMT-5", year(time), 7, 1, 0)  // July 1st
+        quarter_end := timestamp("GMT-5", year(time), 9, 30, 23, 59)  // September 30th
+    else
+        quarter_start := timestamp("GMT-5", year(time), 10, 1, 0)  // October 1st
+        quarter_end := timestamp("GMT-5", year(time), 12, 31, 23, 59)  // December 31st
+    [quarter_start, quarter_end]
+
+
+// Define weekly cycle ranges and apply labels
+cyclerange_weekly(start_time, end_time, string textinput, color col) =>
+    int y = calculate_y_position(5)  // Adjusting y-position for weekly cycle
+    box.new(start_time, y, end_time, y - 1, bgcolor=col, text = show_labels ? textinput : "", border_color=color.black, xloc=xloc.bar_time, border_style=line.style_solid, border_width = border_thickness, text_size=text_size_input)
+
+// Function to find the first Friday of the month
+get_first_friday() =>
+    // Find the day of the week for the 1st of the current month
+    day_of_week_on_first = dayofweek(timestamp("GMT-5", year(time), month(time), 1))
+    // Calculate how many days to add to reach the first Friday (day 6 in Pine Script's dayofweek function)
+    days_to_friday = (6 - day_of_week_on_first + 7) % 7
+    // Return the timestamp of the first Friday
+    timestamp("GMT-5", year(time), month(time), 1 + days_to_friday, 0)
+
+// Function to determine the start and end of NFP Week
+get_nfp_week_start_end() =>
+    first_friday = get_first_friday()
+    // Start NFP Week at 18:00 on the Sunday before the first Friday
+    week_start = timestamp("GMT-5", year(first_friday), month(first_friday), dayofmonth(first_friday) - dayofweek(first_friday) + 1, 18)
+    // End NFP Week at 18:00 on the Saturday after the first Friday
+    week_end = week_start + 6 * 24 * 60 * 60 * 1000
+    [week_start, week_end]
+
+// Function to determine the start and end of subsequent weeks
+get_week_start_end(int nfp_week_start, int week_num) =>
+    week_start = nfp_week_start + (week_num - 1) * 7 * 24 * 60 * 60 * 1000
+    week_end = week_start + 6 * 24 * 60 * 60 * 1000  // Ends on Saturday 18:00
+    [week_start, week_end]
+
+
+// New Daily cycles function
+cyclerange_Daily_cycles(condition_start, condition_end, string textinput, color col) =>
+    if condition_start and not condition_start[1]
+        int y = calculate_y_position(6)
+        box.new(time, y, time + (24 * 60 * 60 * 1000), y - 1, bgcolor=col, text = show_labels ? textinput : "", border_color=color.black, xloc=xloc.bar_time, border_style=line.style_solid, border_width = border_thickness, text_size=text_size_input)
+
+// Function to check if the current day and hour are within a specified range
+is_in_day_hour_range(day_of_week, start_hour, end_hour) =>
+    current_time_ny = timestamp("GMT-7", year, month, dayofmonth, hour, minute, second)  // Set current time in NY timezone
+    current_day = dayofweek(current_time_ny) - 1  // Adjust to 0-6 range where 0 is Sunday
+    current_hour = hour(current_time_ny)
+    current_day == day_of_week and current_hour >= start_hour and current_hour < end_hour
+
+cyclerange_6_hour(condition, string textinput, color col) =>
+    if condition and not condition[1]
+        int y = calculate_y_position(7)
+        box.new(time, y, time + 6 * 60 * 60 * 1000, y - 1, bgcolor=col, text = show_labels ? textinput : "", border_color=color.black, xloc=xloc.bar_time, border_style=line.style_solid, border_width = border_thickness, text_size=text_size_input)
+
+cyclerange_90_min(condition, string textinput, color col) =>
+    if condition and not condition[1]
+        int y = calculate_y_position(8)
+        box.new(time, y, time + 90 * 60 * 1000, y - 1, bgcolor=col, text = show_labels ? textinput : "", border_color=color.black, xloc=xloc.bar_time, border_style=line.style_solid, border_width = border_thickness, text_size=text_size_input)
+
+cyclerange_22_5_min(condition, string textinput, color col) =>
+    if condition and not condition[1]
+        int y = calculate_y_position(9)
+        box.new(time, y, int(time + 22.5 * 60 * 1000), y - 1, bgcolor=col, text = show_labels ? textinput : "", border_color=color.black, xloc=xloc.bar_time, border_style=line.style_solid, border_width = border_thickness, text_size=text_size_input)
+
+cyclerange_5_625_min(condition, string textinput, color col) =>
+    if condition and not condition[1]
+        int y = calculate_y_position(10)
+        box.new(time, y, int(time + 5.1 * 60 * 1000), y - 1, bgcolor=col, text = show_labels ? textinput : "", border_color=color.black, xloc=xloc.bar_time, border_style=line.style_solid, border_width = border_thickness, text_size=text_size_input)
+
+
+// Function calls for different cycle ranges
+if show6HourCycles and is_show6HourCycles_timeframe()
+    cyclerange_6_hour(is_in_range_6_hour(0, 0, 6, 0), "Lon", q2_color)
+    cyclerange_6_hour(is_in_range_6_hour(6, 0, 12, 0), "AM", q3_color)
+    cyclerange_6_hour(is_in_range_6_hour(12, 0, 18, 0), "PM", q4_color)
+    cyclerange_6_hour(is_in_range_6_hour(18, 0, 24, 0), "Asia", q1_color)
+
+
+if show90MinIntervals and ishow90MinIntervals_timeframe()
+    cyclerange_90_min(is_in_range_90_min(0, 0),"Q1",q1_color)
+    cyclerange_90_min(is_in_range_90_min(1, 30),"Q2", q2_color)
+    cyclerange_90_min(is_in_range_90_min(3, 0),"Q3", q3_color)
+    cyclerange_90_min(is_in_range_90_min(4, 30),"Q4", q4_color)
+    cyclerange_90_min(is_in_range_90_min(6, 0),"Q1",q1_color)
+    cyclerange_90_min(is_in_range_90_min(7, 30),"Q2", q2_color)
+    cyclerange_90_min(is_in_range_90_min(9, 0),"Q3", q3_color)
+    cyclerange_90_min(is_in_range_90_min(10, 30),"Q4", q4_color)
+    cyclerange_90_min(is_in_range_90_min(12, 0),"Q1",q1_color)
+    cyclerange_90_min(is_in_range_90_min(13, 30),"Q2", q2_color)
+    cyclerange_90_min(is_in_range_90_min(15, 0),"Q3", q3_color)
+    cyclerange_90_min(is_in_range_90_min(16, 30),"Q4", q4_color)
+    cyclerange_90_min(is_in_range_90_min(18, 0),"Q1",q1_color)
+    cyclerange_90_min(is_in_range_90_min(19, 30),"Q2", q2_color)
+    cyclerange_90_min(is_in_range_90_min(21, 0),"Q3", q3_color)
+    cyclerange_90_min(is_in_range_90_min(22, 30),"Q4", q4_color)
+
+if show22_5MinIntervals and show22_5MinIntervals_timeframe()
+    cyclerange_22_5_min(is_in_range_22_5_min(0, 0),"Q1",q1_color)      // 00:00 to 00:22.5
+    cyclerange_22_5_min(is_in_range_22_5_min(0, 22), "Q2", q2_color)     // 00:22.5 to 00:45
+    cyclerange_22_5_min(is_in_range_22_5_min(0, 45), "Q3", q3_color)      // 00:45 to 01:07.5
+    cyclerange_22_5_min(is_in_range_22_5_min(1, 7), "Q4", q4_color)     // 01:07.5 to 01:30
+    cyclerange_22_5_min(is_in_range_22_5_min(1, 30),"Q1",q1_color)     // 01:30 to 01:52.5
+    cyclerange_22_5_min(is_in_range_22_5_min(1, 52), "Q2", q2_color)     // 01:52.5 to 02:15
+    cyclerange_22_5_min(is_in_range_22_5_min(2, 15), "Q3", q3_color)     // 02:15 to 02:37.5
+    cyclerange_22_5_min(is_in_range_22_5_min(2, 37), "Q4", q4_color)    // 02:37.5 to 03:00
+    cyclerange_22_5_min(is_in_range_22_5_min(3, 0),"Q1",q1_color)      // 03:00 to 03:22.5
+    cyclerange_22_5_min(is_in_range_22_5_min(3, 22), "Q2", q2_color)     // 03:22.5 to 03:45
+    cyclerange_22_5_min(is_in_range_22_5_min(3, 45), "Q3", q3_color)     // 03:45 to 04:07.5
+    cyclerange_22_5_min(is_in_range_22_5_min(4, 7), "Q4", q4_color)     // 04:07.5 to 04:30
+    cyclerange_22_5_min(is_in_range_22_5_min(4, 30),"Q1",q1_color)     // 04:30 to 04:52.5
+    cyclerange_22_5_min(is_in_range_22_5_min(4, 52), "Q2", q2_color)     // 04:52.5 to 05:15
+    cyclerange_22_5_min(is_in_range_22_5_min(5, 15), "Q3", q3_color)     // 05:15 to 05:37.5
+    cyclerange_22_5_min(is_in_range_22_5_min(5, 37), "Q4", q4_color)    // 05:37.5 to 06:00
+    cyclerange_22_5_min(is_in_range_22_5_min(6, 0),"Q1",q1_color)      // 06:00 to 06:22.5
+    cyclerange_22_5_min(is_in_range_22_5_min(6, 22), "Q2", q2_color)     // 06:22.5 to 06:45
+    cyclerange_22_5_min(is_in_range_22_5_min(6, 45), "Q3", q3_color)     // 06:45 to 07:07.5
+    cyclerange_22_5_min(is_in_range_22_5_min(7, 7), "Q4", q4_color)     // 07:07.5 to 07:30
+    cyclerange_22_5_min(is_in_range_22_5_min(7, 30),"Q1",q1_color)     // 07:30 to 07:52.5
+    cyclerange_22_5_min(is_in_range_22_5_min(7, 52), "Q2", q2_color)     // 07:52.5 to 08:15
+    cyclerange_22_5_min(is_in_range_22_5_min(8, 15), "Q3", q3_color)     // 08:15 to 08:37.5
+    cyclerange_22_5_min(is_in_range_22_5_min(8, 37), "Q4", q4_color)    // 08:37.5 to 09:00
+    cyclerange_22_5_min(is_in_range_22_5_min(9, 0),"Q1",q1_color)      // 09:00 to 09:22.5
+    cyclerange_22_5_min(is_in_range_22_5_min(9, 22), "Q2", q2_color)     // 09:22.5 to 09:45
+    cyclerange_22_5_min(is_in_range_22_5_min(9, 45), "Q3", q3_color)     // 09:45 to 10:07.5
+    cyclerange_22_5_min(is_in_range_22_5_min(10, 7), "Q4", q4_color)    // 10:07.5 to 10:30
+    cyclerange_22_5_min(is_in_range_22_5_min(10, 30),"Q1",q1_color)    // 10:30 to 10:52.5
+    cyclerange_22_5_min(is_in_range_22_5_min(10, 52), "Q2", q2_color)    // 10:52.5 to 11:15
+    cyclerange_22_5_min(is_in_range_22_5_min(11, 15), "Q3", q3_color)    // 11:15 to 11:37.5
+    cyclerange_22_5_min(is_in_range_22_5_min(11, 37), "Q4", q4_color)   // 11:37.5 to 12:00
+    cyclerange_22_5_min(is_in_range_22_5_min(12, 0),"Q1",q1_color)     // 12:00 to 12:22.5
+    cyclerange_22_5_min(is_in_range_22_5_min(12, 22), "Q2", q2_color)    // 12:22.5 to 12:45
+    cyclerange_22_5_min(is_in_range_22_5_min(12, 45), "Q3", q3_color)    // 12:45 to 01:07.5
+    cyclerange_22_5_min(is_in_range_22_5_min(13, 7), "Q4", q4_color)    // 01:07.5 to 01:30
+    cyclerange_22_5_min(is_in_range_22_5_min(13, 30),"Q1",q1_color)    // 01:30 to 01:52.5
+    cyclerange_22_5_min(is_in_range_22_5_min(13, 52), "Q2", q2_color)    // 01:52.5 to 02:15 
+    cyclerange_22_5_min(is_in_range_22_5_min(14, 15), "Q3", q3_color)    // 02:15 to 02:37.5
+    cyclerange_22_5_min(is_in_range_22_5_min(14, 37), "Q4", q4_color)   // 02:37.5 to 03:00
+    cyclerange_22_5_min(is_in_range_22_5_min(15, 0),"Q1",q1_color)     // 03:00 to 03:22.5
+    cyclerange_22_5_min(is_in_range_22_5_min(15, 22), "Q2", q2_color)    // 03:22.5 to 03:45
+    cyclerange_22_5_min(is_in_range_22_5_min(15, 45), "Q3", q3_color)    // 03:45 to 04:07.5
+    cyclerange_22_5_min(is_in_range_22_5_min(16, 7), "Q4", q4_color)    // 04:07.5 to 04:30
+    cyclerange_22_5_min(is_in_range_22_5_min(16, 30),"Q1",q1_color)    // 04:30 to 04:52.5
+    cyclerange_22_5_min(is_in_range_22_5_min(16, 52), "Q2", q2_color)    // 04:52.5 to 05:15
+    cyclerange_22_5_min(is_in_range_22_5_min(17, 15), "Q3", q3_color)    // 05:15 to 05:37.5
+    cyclerange_22_5_min(is_in_range_22_5_min(17, 37), "Q4", q4_color)   // 05:37.5 to 06:00
+    cyclerange_22_5_min(is_in_range_22_5_min(18, 0),"Q1",q1_color)     // 06:00 to 06:22.5
+    cyclerange_22_5_min(is_in_range_22_5_min(18, 22), "Q2", q2_color)    // 06:22.5 to 06:45
+    cyclerange_22_5_min(is_in_range_22_5_min(18, 45), "Q3", q3_color)    // 06:45 to 07:07.5
+    cyclerange_22_5_min(is_in_range_22_5_min(19, 7), "Q4", q4_color)    // 07:07.5 to 07:30
+    cyclerange_22_5_min(is_in_range_22_5_min(19, 30),"Q1",q1_color)    // 07:30 to 07:52.5
+    cyclerange_22_5_min(is_in_range_22_5_min(19, 52), "Q2", q2_color)    // 07:52.5 to 08:15
+    cyclerange_22_5_min(is_in_range_22_5_min(20, 15), "Q3", q3_color)    // 08:15 to 08:37.5
+    cyclerange_22_5_min(is_in_range_22_5_min(20, 37), "Q4", q4_color)   // 08:37.5 to 09:00
+    cyclerange_22_5_min(is_in_range_22_5_min(21, 0),"Q1",q1_color)     // 09:00 to 09:22.5
+    cyclerange_22_5_min(is_in_range_22_5_min(21, 22), "Q2", q2_color)    // 09:22.5 to 09:45
+    cyclerange_22_5_min(is_in_range_22_5_min(21, 45), "Q3", q3_color)    // 09:45 to 10:07.5
+    cyclerange_22_5_min(is_in_range_22_5_min(22, 7), "Q4", q4_color)    // 10:07.5 to 10:30
+    cyclerange_22_5_min(is_in_range_22_5_min(22, 30),"Q1",q1_color)    // 10:30 to 10:52.5
+    cyclerange_22_5_min(is_in_range_22_5_min(22, 52), "Q2", q2_color)    // 10:52.5 to 11:15
+    cyclerange_22_5_min(is_in_range_22_5_min(23, 15), "Q3", q3_color)    // 11:15 to 11:37.5
+    cyclerange_22_5_min(is_in_range_22_5_min(23, 37), "Q4", q4_color)   // 11:37.5 to 12:00
+
+if show5_625MinIntervals and show5_625MinIntervals_timeframe()
+    cyclerange_5_625_min(is_in_range_5_625_min(0, 0), "Q1",q1_color)     // 00:00 to 00:05.625
+    cyclerange_5_625_min(is_in_range_5_625_min(0, 5),  "Q2", q2_color)     // 00:05.625 to 00:11.25
+    cyclerange_5_625_min(is_in_range_5_625_min(0, 11),  "Q3", q3_color)    // 00:11.25 to 00:16.875
+    cyclerange_5_625_min(is_in_range_5_625_min(0, 17),  "Q4", q4_color)   // 00:16.875 to 00:22.5
+
+    cyclerange_5_625_min(is_in_range_5_625_min(0, 22),"Q1",q1_color)     // 00:22:30 - 00:28:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(0, 28), "Q2", q2_color)     // 00:28:07.5 - 00:33:45
+    cyclerange_5_625_min(is_in_range_5_625_min(0, 33), "Q3", q3_color)     // 00:33:45 - 00:39:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(0, 39), "Q4", q4_color)    // 00:39:22.5 - 00:45:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(0, 45),"Q1",q1_color)     // 00:45:00 - 00:50:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(0, 50), "Q2", q2_color)     // 00:50:37.5 - 00:56:15
+    cyclerange_5_625_min(is_in_range_5_625_min(0, 56), "Q3", q3_color)     // 00:56:15 - 01:01:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(1, 1), "Q4", q4_color)     // 01:01:52.5 - 01:07:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(1, 7),"Q1",q1_color)      // 01:07:30 - 01:13:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(1, 13), "Q2", q2_color)     // 01:13:07.5 - 01:18:45
+    cyclerange_5_625_min(is_in_range_5_625_min(1, 18), "Q3", q3_color)     // 01:18:45 - 01:24:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(1, 24), "Q4", q4_color)    // 01:24:22.5 - 01:30:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(1, 30),"Q1",q1_color)     // 01:30:00 - 01:35:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(1, 35), "Q2", q2_color)     // 01:35:37.5 - 01:41:15
+    cyclerange_5_625_min(is_in_range_5_625_min(1, 41), "Q3", q3_color)     // 01:41:15 - 01:46:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(1, 46), "Q4", q4_color)    // 01:46:52.5 - 01:52:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(1, 52),"Q1",q1_color)     // 01:52:30 - 01:58:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(1, 58), "Q2", q2_color)     // 01:58:07.5 - 02:03:45
+    cyclerange_5_625_min(is_in_range_5_625_min(2, 3), "Q3", q3_color)      // 02:03:45 - 02:09:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(2, 9), "Q4", q4_color)     // 02:09:22.5 - 02:15:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(2, 15),"Q1",q1_color)     // 02:15:00 - 02:20:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(2, 20), "Q2", q2_color)     // 02:20:37.5 - 02:26:15
+    cyclerange_5_625_min(is_in_range_5_625_min(2, 26), "Q3", q3_color)     // 02:26:15 - 02:31:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(2, 31), "Q4", q4_color)    // 02:31:52.5 - 02:37:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(2, 37),"Q1",q1_color)      // 02:37:30 - 02:43:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(2, 43), "Q2", q2_color)      // 02:43:07.5 - 02:48:45
+    cyclerange_5_625_min(is_in_range_5_625_min(2, 48), "Q3", q3_color)      // 02:48:45 - 02:54:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(2, 54), "Q4", q4_color)     // 02:54:22.5 - 03:00:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(3, 0),"Q1",q1_color)        // 03:00:00 - 03:05:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(3, 5), "Q2", q2_color)        // 03:05:37.5 - 03:11:15
+    cyclerange_5_625_min(is_in_range_5_625_min(3, 11), "Q3", q3_color)      // 03:11:15 - 03:16:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(3, 16), "Q4", q4_color)     // 03:16:52.5 - 03:22:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(3, 22),"Q1",q1_color)      // 03:22:30 - 03:28:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(3, 28), "Q2", q2_color)      // 03:28:07.5 - 03:33:45
+    cyclerange_5_625_min(is_in_range_5_625_min(3, 33), "Q3", q3_color)      // 03:33:45 - 03:39:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(3, 39), "Q4", q4_color)     // 03:39:22.5 - 03:45:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(3, 45),"Q1",q1_color)      // 03:45:00 - 03:50:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(3, 50), "Q2", q2_color)      // 03:50:37.5 - 03:56:15
+    cyclerange_5_625_min(is_in_range_5_625_min(3, 56), "Q3", q3_color)      // 03:56:15 - 04:01:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(4, 1), "Q4", q4_color)      // 04:01:52.5 - 04:07:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(4, 7),"Q1",q1_color)       // 04:07:30 - 04:13:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(4, 13), "Q2", q2_color)      // 04:13:07.5 - 04:18:45
+    cyclerange_5_625_min(is_in_range_5_625_min(4, 18), "Q3", q3_color)      // 04:18:45 - 04:24:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(4, 24), "Q4", q4_color)     // 04:24:22.5 - 04:30:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(4, 30),"Q1",q1_color)      // 04:30:00 - 04:35:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(4, 35), "Q2", q2_color)      // 04:35:37.5 - 04:41:15
+    cyclerange_5_625_min(is_in_range_5_625_min(4, 41), "Q3", q3_color)      // 04:41:15 - 04:46:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(4, 46), "Q4", q4_color)     // 04:46:52.5 - 04:52:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(4, 52),"Q1",q1_color)      // 04:52:30 - 04:58:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(4, 58), "Q2", q2_color)      // 04:58:07.5 - 05:03:45
+    cyclerange_5_625_min(is_in_range_5_625_min(5, 3), "Q3", q3_color)       // 05:03:45 - 05:09:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(5, 9), "Q4", q4_color)      // 05:09:22.5 - 05:15:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(5, 15),"Q1",q1_color)      // 05:15:00 - 05:20:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(5, 20), "Q2", q2_color)      // 05:20:37.5 - 05:26:15
+    cyclerange_5_625_min(is_in_range_5_625_min(5, 26), "Q3", q3_color)      // 05:26:15 - 05:31:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(5, 31), "Q4", q4_color)     // 05:31:52.5 - 05:37:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(5, 37),"Q1",q1_color)      // 05:37:30 - 05:43:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(5, 43), "Q2", q2_color)      // 05:43:07.5 - 05:48:45
+    cyclerange_5_625_min(is_in_range_5_625_min(5, 48), "Q3", q3_color)      // 05:48:45 - 05:54:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(5, 54), "Q4", q4_color)     // 05:54:22.5 - 06:00:00
+
+// AM SESSION
+    cyclerange_5_625_min(is_in_range_5_625_min(6, 0),"Q1",q1_color)        // 06:00:00 - 06:05:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(6, 5), "Q2", q2_color)        // 06:05:37.5 - 06:11:15
+    cyclerange_5_625_min(is_in_range_5_625_min(6, 11), "Q3", q3_color)      // 06:11:15 - 06:16:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(6, 16), "Q4", q4_color)     // 06:16:52.5 - 06:22:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(6, 22),"Q1",q1_color)      // 06:22:30 - 06:28:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(6, 28), "Q2", q2_color)      // 06:28:07.5 - 06:33:45
+    cyclerange_5_625_min(is_in_range_5_625_min(6, 33), "Q3", q3_color)      // 06:33:45 - 06:39:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(6, 39), "Q4", q4_color)     // 06:39:22.5 - 06:45:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(6, 45),"Q1",q1_color)      // 06:45:00 - 06:50:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(6, 50), "Q2", q2_color)      // 06:50:37.5 - 06:56:15
+    cyclerange_5_625_min(is_in_range_5_625_min(6, 56), "Q3", q3_color)      // 06:56:15 - 07:01:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(7, 1), "Q4", q4_color)      // 07:01:52.5 - 07:07:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(7, 7),"Q1",q1_color)       // 07:07:30 - 07:13:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(7, 13), "Q2", q2_color)      // 07:13:07.5 - 07:18:45
+    cyclerange_5_625_min(is_in_range_5_625_min(7, 18), "Q3", q3_color)      // 07:18:45 - 07:24:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(7, 24), "Q4", q4_color)     // 07:24:22.5 - 07:30:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(7, 30),"Q1",q1_color)      // 07:30:00 - 07:35:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(7, 35), "Q2", q2_color)      // 07:35:37.5 - 07:41:15
+    cyclerange_5_625_min(is_in_range_5_625_min(7, 41), "Q3", q3_color)      // 07:41:15 - 07:46:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(7, 46), "Q4", q4_color)     // 07:46:52.5 - 07:52:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(7, 52),"Q1",q1_color)      // 07:52:30 - 07:58:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(7, 58), "Q2", q2_color)      // 07:58:07.5 - 08:03:45
+    cyclerange_5_625_min(is_in_range_5_625_min(8, 3), "Q3", q3_color)       // 08:03:45 - 08:09:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(8, 9), "Q4", q4_color)      // 08:09:22.5 - 08:15:00 
+
+    cyclerange_5_625_min(is_in_range_5_625_min(8, 15),"Q1",q1_color)      // 08:15:00 - 08:20:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(8, 20), "Q2", q2_color)      // 08:20:37.5 - 08:26:15
+    cyclerange_5_625_min(is_in_range_5_625_min(8, 26), "Q3", q3_color)      // 08:26:15 - 08:31:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(8, 31), "Q4", q4_color)     // 08:31:52.5 - 08:37:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(8, 37),"Q1",q1_color)      // 08:37:30 - 08:43:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(8, 43), "Q2", q2_color)      // 08:43:07.5 - 08:48:45
+    cyclerange_5_625_min(is_in_range_5_625_min(8, 48), "Q3", q3_color)      // 08:48:45 - 08:54:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(8, 54), "Q4", q4_color)     // 08:54:22.5 - 09:00:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(9, 0),"Q1",q1_color)        // 09:00:00 - 09:05:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(9, 5), "Q2", q2_color)        // 09:05:37.5 - 09:11:15
+    cyclerange_5_625_min(is_in_range_5_625_min(9, 11), "Q3", q3_color)      // 09:11:15 - 09:16:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(9, 16), "Q4", q4_color)     // 09:16:52.5 - 09:22:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(9, 22),"Q1",q1_color)      // 09:22:30 - 09:28:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(9, 28), "Q2", q2_color)      // 09:28:07.5 - 09:33:45
+    cyclerange_5_625_min(is_in_range_5_625_min(9, 33), "Q3", q3_color)      // 09:33:45 - 09:39:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(9, 39), "Q4", q4_color)     // 09:39:22.5 - 09:45:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(9, 45),"Q1",q1_color)      // 09:45:00 - 09:50:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(9, 50), "Q2", q2_color)      // 09:50:37.5 - 09:56:15
+    cyclerange_5_625_min(is_in_range_5_625_min(9, 56), "Q3", q3_color)      // 09:56:15 - 10:01:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(10, 1), "Q4", q4_color)     // 10:01:52.5 - 10:07:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(10, 7),"Q1",q1_color)      // 10:07:30 - 10:13:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(10, 13), "Q2", q2_color)     // 10:13:07.5 - 10:18:45
+    cyclerange_5_625_min(is_in_range_5_625_min(10, 18), "Q3", q3_color)     // 10:18:45 - 10:24:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(10, 24), "Q4", q4_color)    // 10:24:22.5 - 10:30:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(10, 30),"Q1",q1_color)     // 10:30:00 - 10:35:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(10, 35), "Q2", q2_color)     // 10:35:37.5 - 10:41:15
+    cyclerange_5_625_min(is_in_range_5_625_min(10, 41), "Q3", q3_color)     // 10:41:15 - 10:46:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(10, 46), "Q4", q4_color)    // 10:46:52.5 - 10:52:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(10, 52),"Q1",q1_color)     // 10:52:30 - 10:58:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(10, 58), "Q2", q2_color)     // 10:58:07.5 - 11:03:45
+    cyclerange_5_625_min(is_in_range_5_625_min(11, 3), "Q3", q3_color)      // 11:03:45 - 11:09:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(11, 9), "Q4", q4_color)     // 11:09:22.5 - 11:15:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(11, 15),"Q1",q1_color)     // 11:15:00 - 11:20:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(11, 20), "Q2", q2_color)     // 11:20:37.5 - 11:26:15
+    cyclerange_5_625_min(is_in_range_5_625_min(11, 26), "Q3", q3_color)     // 11:26:15 - 11:31:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(11, 31), "Q4", q4_color)    // 11:31:52.5 - 11:37:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(11, 37),"Q1",q1_color)     // 11:37:30 - 11:43:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(11, 43), "Q2", q2_color)     // 11:43:07.5 - 11:48:45
+    cyclerange_5_625_min(is_in_range_5_625_min(11, 48), "Q3", q3_color)     // 11:48:45 - 11:54:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(11, 54), "Q4", q4_color)    // 11:54:22.5 - 12:00:00
+
+// PM
+    cyclerange_5_625_min(is_in_range_5_625_min(12, 0),"Q1",q1_color)       // 12:00:00 - 12:05:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(12, 5), "Q2", q2_color)       // 12:05:37.5 - 12:11:15
+    cyclerange_5_625_min(is_in_range_5_625_min(12, 11), "Q3", q3_color)     // 12:11:15 - 12:16:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(12, 16), "Q4", q4_color)    // 12:16:52.5 - 12:22:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(12, 22),"Q1",q1_color)     // 12:22:30 - 12:28:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(12, 28), "Q2", q2_color)     // 12:28:07.5 - 12:33:45
+    cyclerange_5_625_min(is_in_range_5_625_min(12, 33), "Q3", q3_color)     // 12:33:45 - 12:39:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(12, 39), "Q4", q4_color)    // 12:39:22.5 - 12:45:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(12, 45),"Q1",q1_color)     // 12:45:00 - 12:50:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(12, 50), "Q2", q2_color)     // 12:50:37.5 - 12:56:15
+    cyclerange_5_625_min(is_in_range_5_625_min(12, 56), "Q3", q3_color)     // 12:56:15 - 13:01:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(13, 1), "Q4", q4_color)     // 13:01:52.5 - 13:07:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(13, 7),"Q1",q1_color)      // 13:07:30 - 13:13:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(13, 13), "Q2", q2_color)     // 13:13:07.5 - 13:18:45
+    cyclerange_5_625_min(is_in_range_5_625_min(13, 18), "Q3", q3_color)     // 13:18:45 - 13:24:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(13, 24), "Q4", q4_color)    // 13:24:22.5 - 13:30:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(13, 30),"Q1",q1_color)     // 13:30:00 - 13:35:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(13, 35), "Q2", q2_color)     // 13:35:37.5 - 13:41:15
+    cyclerange_5_625_min(is_in_range_5_625_min(13, 41), "Q3", q3_color)     // 13:41:15 - 13:46:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(13, 46), "Q4", q4_color)    // 13:46:52.5 - 13:52:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(13, 52),"Q1",q1_color)     // 13:52:30 - 13:58:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(13, 58), "Q2", q2_color)     // 13:58:07.5 - 14:03:45
+    cyclerange_5_625_min(is_in_range_5_625_min(14, 3), "Q3", q3_color)      // 14:03:45 - 14:09:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(14, 9), "Q4", q4_color)     // 14:09:22.5 - 14:15:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(14, 15),"Q1",q1_color)     // 14:15:00 - 14:20:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(14, 20), "Q2", q2_color)     // 14:20:37.5 - 14:26:15
+    cyclerange_5_625_min(is_in_range_5_625_min(14, 26), "Q3", q3_color)     // 14:26:15 - 14:31:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(14, 31), "Q4", q4_color)    // 14:31:52.5 - 14:37:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(14, 37),"Q1",q1_color)     // 14:37:30 - 14:43:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(14, 43), "Q2", q2_color)     // 14:43:07.5 - 14:48:45
+    cyclerange_5_625_min(is_in_range_5_625_min(14, 48), "Q3", q3_color)     // 14:48:45 - 14:54:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(14, 54), "Q4", q4_color)    // 14:54:22.5 - 15:00:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(15, 0),"Q1",q1_color)      // 15:00:00 - 15:05:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(15, 5), "Q2", q2_color)      // 15:05:37.5 - 15:11:15
+    cyclerange_5_625_min(is_in_range_5_625_min(15, 11), "Q3", q3_color)     // 15:11:15 - 15:16:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(15, 16), "Q4", q4_color)    // 15:16:52.5 - 15:22:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(15, 22),"Q1",q1_color)     // 15:22:30 - 15:28:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(15, 28), "Q2", q2_color)     // 15:28:07.5 - 15:33:45
+    cyclerange_5_625_min(is_in_range_5_625_min(15, 33), "Q3", q3_color)     // 15:33:45 - 15:39:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(15, 39), "Q4", q4_color)    // 15:39:22.5 - 15:45:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(15, 45),"Q1",q1_color)     // 15:45:00 - 15:50:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(15, 50), "Q2", q2_color)     // 15:50:37.5 - 15:56:15
+    cyclerange_5_625_min(is_in_range_5_625_min(15, 56), "Q3", q3_color)     // 15:56:15 - 16:01:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(16, 1), "Q4", q4_color)     // 16:01:52.5 - 16:07:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(16, 7),"Q1",q1_color)      // 16:07:30 - 16:13:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(16, 13), "Q2", q2_color)     // 16:13:07.5 - 16:18:45
+    cyclerange_5_625_min(is_in_range_5_625_min(16, 18), "Q3", q3_color)     // 16:18:45 - 16:24:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(16, 24), "Q4", q4_color)    // 16:24:22.5 - 16:30:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(16, 30),"Q1",q1_color)     // 16:30:00 - 16:35:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(16, 35), "Q2", q2_color)     // 16:35:37.5 - 16:41:15
+    cyclerange_5_625_min(is_in_range_5_625_min(16, 41), "Q3", q3_color)     // 16:41:15 - 16:46:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(16, 46), "Q4", q4_color)    // 16:46:52.5 - 16:52:30
+
+// ASIA
+    cyclerange_5_625_min(is_in_range_5_625_min(18, 0),"Q1",q1_color)        // 06:00:00 - 06:05:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(18, 5), "Q2", q2_color)        // 06:05:37.5 - 06:11:15
+    cyclerange_5_625_min(is_in_range_5_625_min(18, 11), "Q3", q3_color)      // 06:11:15 - 06:16:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(18, 16), "Q4", q4_color)     // 06:16:52.5 - 06:22:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(18, 22),"Q1",q1_color)      // 06:22:30 - 06:28:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(18, 28), "Q2", q2_color)      // 06:28:07.5 - 06:33:45
+    cyclerange_5_625_min(is_in_range_5_625_min(18, 33), "Q3", q3_color)      // 06:33:45 - 06:39:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(18, 39), "Q4", q4_color)     // 06:39:22.5 - 06:45:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(18, 45),"Q1",q1_color)      // 06:45:00 - 06:50:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(18, 50), "Q2", q2_color)      // 06:50:37.5 - 06:56:15
+    cyclerange_5_625_min(is_in_range_5_625_min(18, 56), "Q3", q3_color)      // 06:56:15 - 07:01:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(19, 1), "Q4", q4_color)      // 07:01:52.5 - 07:07:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(19, 7),"Q1",q1_color)       // 07:07:30 - 07:13:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(19, 13), "Q2", q2_color)      // 07:13:07.5 - 07:18:45
+    cyclerange_5_625_min(is_in_range_5_625_min(19, 18), "Q3", q3_color)      // 07:18:45 - 07:24:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(19, 24), "Q4", q4_color)     // 07:24:22.5 - 07:30:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(19, 30),"Q1",q1_color)      // 07:30:00 - 07:35:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(19, 35), "Q2", q2_color)      // 07:35:37.5 - 07:41:15
+    cyclerange_5_625_min(is_in_range_5_625_min(19, 41), "Q3", q3_color)      // 07:41:15 - 07:46:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(19, 46), "Q4", q4_color)     // 07:46:52.5 - 07:52:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(19, 52),"Q1",q1_color)      // 07:52:30 - 07:58:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(19, 58), "Q2", q2_color)      // 07:58:07.5 - 08:03:45
+    cyclerange_5_625_min(is_in_range_5_625_min(20, 3), "Q3", q3_color)       // 08:03:45 - 08:09:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(20, 9), "Q4", q4_color)      // 08:09:22.5 - 08:15:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(20, 15),"Q1",q1_color)      // 08:15:00 - 08:20:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(20, 20), "Q2", q2_color)      // 08:20:37.5 - 08:26:15
+    cyclerange_5_625_min(is_in_range_5_625_min(20, 26), "Q3", q3_color)      // 08:26:15 - 08:31:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(20, 31), "Q4", q4_color)     // 08:31:52.5 - 08:37:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(20, 37),"Q1",q1_color)      // 08:37:30 - 08:43:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(20, 43), "Q2", q2_color)      // 08:43:07.5 - 08:48:45
+    cyclerange_5_625_min(is_in_range_5_625_min(20, 48), "Q3", q3_color)      // 08:48:45 - 08:54:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(20, 54), "Q4", q4_color)     // 08:54:22.5 - 09:00:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(21, 0),"Q1",q1_color)        // 09:00:00 - 09:05:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(21, 5), "Q2", q2_color)        // 09:05:37.5 - 09:11:15
+    cyclerange_5_625_min(is_in_range_5_625_min(21, 11), "Q3", q3_color)      // 09:11:15 - 09:16:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(21, 16), "Q4", q4_color)     // 09:16:52.5 - 09:22:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(21, 22),"Q1",q1_color)      // 09:22:30 - 09:28:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(21, 28), "Q2", q2_color)      // 09:28:07.5 - 09:33:45
+    cyclerange_5_625_min(is_in_range_5_625_min(21, 33), "Q3", q3_color)      // 09:33:45 - 09:39:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(21, 39), "Q4", q4_color)     // 09:39:22.5 - 09:45:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(21, 45),"Q1",q1_color)      // 09:45:00 - 09:50:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(21, 50), "Q2", q2_color)      // 09:50:37.5 - 09:56:15
+    cyclerange_5_625_min(is_in_range_5_625_min(21, 56), "Q3", q3_color)      // 09:56:15 - 10:01:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(22, 1), "Q4", q4_color)     // 10:01:52.5 - 10:07:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(22, 7),"Q1",q1_color)      // 10:07:30 - 10:13:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(22, 13), "Q2", q2_color)     // 10:13:07.5 - 10:18:45
+    cyclerange_5_625_min(is_in_range_5_625_min(22, 18), "Q3", q3_color)     // 10:18:45 - 10:24:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(22, 24), "Q4", q4_color)    // 10:24:22.5 - 10:30:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(22, 30),"Q1",q1_color)     // 10:30:00 - 10:35:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(22, 35), "Q2", q2_color)     // 10:35:37.5 - 10:41:15
+    cyclerange_5_625_min(is_in_range_5_625_min(22, 41), "Q3", q3_color)     // 10:41:15 - 10:46:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(22, 46), "Q4", q4_color)    // 10:46:52.5 - 10:52:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(22, 52),"Q1",q1_color)     // 10:52:30 - 10:58:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(22, 58), "Q2", q2_color)     // 10:58:07.5 - 11:03:45
+    cyclerange_5_625_min(is_in_range_5_625_min(23, 3), "Q3", q3_color)      // 11:03:45 - 11:09:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(23, 9), "Q4", q4_color)     // 11:09:22.5 - 11:15:00
+
+    cyclerange_5_625_min(is_in_range_5_625_min(23, 15),"Q1",q1_color)     // 11:15:00 - 11:20:37.5
+    cyclerange_5_625_min(is_in_range_5_625_min(23, 20), "Q2", q2_color)     // 11:20:37.5 - 11:26:15
+    cyclerange_5_625_min(is_in_range_5_625_min(23, 26), "Q3", q3_color)     // 11:26:15 - 11:31:52.5
+    cyclerange_5_625_min(is_in_range_5_625_min(23, 31), "Q4", q4_color)    // 11:31:52.5 - 11:37:30
+
+    cyclerange_5_625_min(is_in_range_5_625_min(23, 37),"Q1",q1_color)     // 11:37:30 - 11:43:07.5
+    cyclerange_5_625_min(is_in_range_5_625_min(23, 43), "Q2", q2_color)     // 11:43:07.5 - 11:48:45
+    cyclerange_5_625_min(is_in_range_5_625_min(23, 48), "Q3", q3_color)     // 11:48:45 - 11:54:22.5
+    cyclerange_5_625_min(is_in_range_5_625_min(23, 54), "Q4", q4_color)    // 11:54:22.5 - 12:00:00
+
+// Add Daily cycles
+// Add Daily cycles
+if showDailyCycles and is_DailyRanges_timeframe()
+
+    cyclerange_Daily_cycles(is_in_day_hour_range(0, 18, 24) or is_in_day_hour_range(1, 0, 18),is_in_day_hour_range(1, 18, 24) or is_in_day_hour_range(2, 0, 18),"Mon", q1_color)
+
+    cyclerange_Daily_cycles(is_in_day_hour_range(1, 18, 24) or is_in_day_hour_range(2, 0, 18),is_in_day_hour_range(2, 18, 24) or is_in_day_hour_range(3, 0, 18),"Tue", q2_color)
+
+    cyclerange_Daily_cycles(is_in_day_hour_range(2, 18, 24) or is_in_day_hour_range(3, 0, 18),is_in_day_hour_range(3, 18, 24) or is_in_day_hour_range(4, 0, 18),"Wed", q3_color)
+
+    cyclerange_Daily_cycles(is_in_day_hour_range(3, 18, 24) or is_in_day_hour_range(4, 0, 18),is_in_day_hour_range(4, 18, 24) or is_in_day_hour_range(5, 0, 18),"Thu", q4_color)
+
+// Check which week it is and apply corresponding color and label
+if is_WeeklyRanges_timeframe() and ShowWeeklyCyles
+    // Get the start and end of NFP Week (Week 1)
+    [nfp_week_start, nfp_week_end] = get_nfp_week_start_end()
+
+    // Week 1 (NFP Week)
+    cyclerange_weekly(nfp_week_start, nfp_week_end, "NFP Week", q1_color) // Using index 1
+
+    // Week 2
+    [week2_start, week2_end] = get_week_start_end(nfp_week_start, 2)
+    cyclerange_weekly(week2_start, week2_end, "Week 2", q2_color) // Using index 2
+
+    // Week 3
+    [week3_start, week3_end] = get_week_start_end(nfp_week_start, 3)
+    cyclerange_weekly(week3_start, week3_end, "Week 3", q3_color) // Using index 3
+
+    // Week 4
+    [week4_start, week4_end] = get_week_start_end(nfp_week_start, 4)
+    cyclerange_weekly(week4_start, week4_end, "Week 4", q4_color) // Using index 4
+
+
+// Check which quarter it is and apply corresponding color and label
+if is_YearlyRanges_timeframe() and ShowYearlyCyles
+    // Get the start and end times for each quarter
+    [q1_start, q1_end] = get_quarter_start_end(1)
+    [q2_start, q2_end] = get_quarter_start_end(2)
+    [q3_start, q3_end] = get_quarter_start_end(3)
+    [q4_start, q4_end] = get_quarter_start_end(4)
+
+    // Q1: January 1 to March 31
+    cyclerange_quarterly(q1_start, q1_end, "Q1", q1_color)
+
+    // Q2: April 1 to June 30
+    cyclerange_quarterly(q2_start, q2_end, "Q2", q2_color)
+
+    // Q3: July 1 to September 30
+    cyclerange_quarterly(q3_start, q3_end, "Q3", q3_color)
+
+    // Q4: October 1 to December 31
+    cyclerange_quarterly(q4_start, q4_end, "Q4", q4_color)
+
+
+
+// Check and display quadrennial cycle ranges
+if is_YearlyRanges_timeframe() and ShowQuadrennialCyles
+    quad_phase = get_quadrennial_phase()
+    
+    // Get the start and end times for each quadrennial phase
+    [quad_start, quad_end] = get_quadrennial_start_end(quad_phase)
+
+    // Display the appropriate quadrennial phase on the chart
+    if quad_phase == 1
+        cyclerange_quadrennial(quad_start, quad_end, "Quadrennial Q1: Year Before Election", q1_color)
+    if quad_phase == 2
+        cyclerange_quadrennial(quad_start, quad_end, "Quadrennial Q2: US Election Year", q2_color)
+    if quad_phase == 3
+        cyclerange_quadrennial(quad_start, quad_end, "Quadrennial Q3: Year After Election", q3_color)
+    if quad_phase == 4
+        cyclerange_quadrennial(quad_start, quad_end, "Quadrennial Q4: Two Years After Election", q4_color)

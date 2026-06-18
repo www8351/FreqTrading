@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orb"
+version = "0.1.0"
+description = "Opening Range Breakout scalping + momentum-validation signal engine for XAU/USD 1m"
+requires-python = ">=3.11"
+dependencies = []  # stdlib only at runtime
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+orb = "orb.cli:main"
+
+[tool.setuptools]
+packages = ["orb", "orb.feeds"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

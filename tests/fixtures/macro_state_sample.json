@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-06-16T10:40:00Z",
+  "ttl_sec": 300,
+  "global": {
+    "risk_regime": "risk_off",
+    "risk_score": -0.42,
+    "confidence": 0.78,
+    "blackout": {
+      "active": false,
+      "until": null,
+      "reason": null
+    }
+  },
+  "events": [
+    {
+      "id": "FOMC-2026-06-17",
+      "ts": "2026-06-17T18:00:00Z",
+      "impact": "high",
+      "kind": "rate_decision",
+      "blackout_pre_min": 30,
+      "blackout_post_min": 30
+    }
+  ],
+  "assets": {
+    "XAUUSD": {"bias": "bullish", "score": 0.55, "horizon": "intraday", "drivers": ["risk_off", "real_yields_down"]},
+    "US100":  {"bias": "bearish", "score": -0.30, "horizon": "intraday", "drivers": ["semis_weak", "cpi_hot"]},
+    "US500":  {"bias": "neutral", "score": 0.05, "horizon": "intraday", "drivers": []},
+    "XAGUSD": {"bias": "bullish", "score": 0.40, "horizon": "intraday", "drivers": ["risk_off"]}
+  }
+}
