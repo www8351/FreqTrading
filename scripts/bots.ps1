@@ -80,11 +80,20 @@ switch ($Action) {
     $act = New-ScheduledTaskAction -Execute $ps `
       -Argument "-NoProfile -WindowStyle Hidden -File `"$PSCommandPath`" watch"
     $trg = New-ScheduledTaskTrigger -AtLogOn
+    $prin = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
     $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
       -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-    Register-ScheduledTask -TaskName $TASK -Action $act -Trigger $trg -Settings $set `
-      -Description 'ORB live-bot keeper (XAUUSD + US100)' -Force | Out-Null
-    Write-Host "installed Scheduled Task '$TASK' (runs at logon). Turn on with: bots.ps1 on"
+    try {
+      Register-ScheduledTask -TaskName $TASK -Action $act -Trigger $trg -Principal $prin `
+        -Settings $set -Description 'ORB live-bot keeper (XAUUSD + US100)' -Force `
+        -ErrorAction Stop | Out-Null
+      Write-Host "installed Scheduled Task '$TASK' (runs at logon). Turn on with: bots.ps1 on"
+    } catch {
+      Write-Host "INSTALL FAILED: $($_.Exception.Message)"
+      Write-Host "If 'Access is denied': run in an ELEVATED PowerShell (Run as Administrator)."
+      Write-Host "schtasks fallback (run elevated):"
+      Write-Host "  schtasks /create /tn $TASK /sc onlogon /rl LIMITED /f /tr `"`'$ps`' -NoProfile -WindowStyle Hidden -File `'$PSCommandPath`' watch`""
+    }
   }
   'on' {
     Remove-Item $STOP -ErrorAction SilentlyContinue
