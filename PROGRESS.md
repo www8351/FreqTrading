@@ -1,5 +1,21 @@
 # PROGRESS
 
+## 2026-06-18 (pm) — blind-feed incident + bot ops tooling
+- Diagnosed "no trades since 6/15": MT5 terminal restarted 6/16 → python↔terminal IPC
+  dead (`-10001 IPC send failed`) every poll, all 4 bots blind ~2 days; signal logs
+  frozen 6/15 22:54. Also 2 duplicate procs/symbol (two python installs).
+- Fixed feed: `orb/feeds/mt5feed.py` `_reconnect` after `RECONNECT_AFTER=3` no-rate polls
+  (shutdown+initialize+symbol_select, back off while terminal down); offset/last_emitted
+  preserved. +reconnect test → 186 green. Committed `cc2927f`.
+- Backed up the 4 signal logs → `log_backups\` (gitignored).
+- New `scripts/bots.ps1`: single keeper+control (install/on/off/restart/watch/status).
+  ENABLED = XAUUSD + US100 (US500/XAGUSD disabled, configs kept commented). ON/OFF =
+  "ORB-Bots-Keeper" Scheduled Task (logon autostart). Reuses watchdog launch args +
+  STOP_TRADING + `live_state.py`. `watchdog.ps1` trimmed to 2 + deprecated.
+- `status` validated read-only: BOTS OFF, both enabled bots alive + feeding=False (blind),
+  4 disabled-symbol procs flagged, account flat $428.77. D-014 recorded.
+- Pending: owner runs install / restart / on (killing live bots was classifier-blocked).
+
 ## 2026-06-17 — Second brain: open questions resolved, plan finalized
 - Re-explored the repo (3 Explore agents): confirmed custom ORB engine (not
   Freqtrade); verified exact macro hookpoints in `orb/cli.py` (on_signal after

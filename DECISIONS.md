@@ -82,6 +82,26 @@
   trades (at placement ts) as JSON for `backtest_macro.py`. Validated on real data
   (395 XAU trades → dropped 27, PF 1.834 → 1.898). 185 tests green.
 
+## D-014 — Live ops: universe = XAUUSD + US100, ON/OFF via Scheduled Task
+- **Date:** 2026-06-18
+- **Decision:** Run only **XAUUSD + US100** live (disable US500 + XAGUSD). Manage bots
+  via `scripts/bots.ps1` (keeper + install/on/off/restart/status/watch); **ON/OFF = the
+  "ORB-Bots-Keeper" Windows Scheduled Task** state (logon autostart, survives reboot).
+  `scripts/watchdog.ps1` superseded (trimmed to the 2, kept as manual fallback).
+- **Why:** Owner choice to focus on gold + Nasdaq. The macro gate (synthetic calendar)
+  showed the filter HURT XAGUSD (PF 1.08→1.05, net −$978) and helped indices, so
+  dropping silver aligns; US500 dropped too per owner. A Scheduled Task gives an
+  unambiguous on/off (the bots had silently gone blind and a plain watchdog couldn't
+  tell, since procs stayed alive).
+- **Related fix:** `orb/feeds/mt5feed.py` now self-heals the IPC link on a terminal
+  restart (commit `cc2927f`) — root cause of the ~2-day blind-feed outage (terminal
+  restarted 6/16 → dead python↔terminal pipe → `-10001 IPC send failed` forever).
+- **Rejected:** keep all 4 (silver bleeds under macro, thin spread); manual watchdog
+  only (no clear on/off; didn't catch the blind-but-alive state).
+- **Status:** Tooling built + `status` verb validated. Owner to run `bots.ps1 install`
+  → `restart` → `on` (live actions). Macro stays off. Re-enable a symbol by adding it
+  back to `bots.ps1 $ENABLED`.
+
 ## D-001 — Adopt 5-file lifecycle protocol
 - **Date:** 2026-06-10
 - **Decision:** Manage the workspace with `README.md`, `STATUS.md`, `PROGRESS.md`, `DECISIONS.md`, `CLAUDE_MEMORY.md` as the source of truth, per `CLAUDE.md`.

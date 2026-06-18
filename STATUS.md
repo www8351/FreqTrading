@@ -2,6 +2,20 @@
 
 _Last updated: 2026-06-18_
 
+## 2026-06-18 (pm) — Live-bot incident fixed + ops tooling (universe = XAU + US100)
+- ROOT CAUSE of "no trades since 6/15": terminal restarted 6/16 → dead python↔terminal
+  IPC (`-10001 IPC send failed`) → all 4 bots blind (alive but 0 candles) ~2 days. Also
+  found DUPLICATE bots (2/symbol, two python installs) — would double-order.
+- FIX: `orb/feeds/mt5feed.py` auto-reconnect on a no-rate streak (commit `cc2927f`, 186
+  tests). New `scripts/bots.ps1` keeper+control (install/on/off/restart/status/watch),
+  ENABLED = **XAUUSD + US100 only**; `watchdog.ps1` trimmed+deprecated. **ON/OFF =
+  Scheduled Task** state. See D-014.
+- NEXT (owner runs — LIVE actions): `powershell -File scripts\bots.ps1 install` →
+  `... restart` (kills the 8 stale/dup procs, relaunches the 2 fresh) → `... on`. Then
+  `... status` should read ON + feeding=True. Bots run macro OFF.
+- BLOCKER: my auto-kill of live bots was classifier-blocked; owner executes
+  restart/on/off (or via `! powershell -File scripts\bots.ps1 <verb>`).
+
 ## 2026-06-18 — Second brain M0–M6 COMPLETE (macro layer built, off by default)
 - All six milestones shipped (see per-milestone notes below + PROGRESS): M0 scaffold,
   M1 calendar blackout, M2 surprise bias (filter), M3 war-spike (guard), M4 sentiment

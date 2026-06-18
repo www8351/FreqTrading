@@ -1,4 +1,8 @@
-# Keeps all 4 ORB live traders running (gold + US100 + US500 + XAGUSD).
+# SUPERSEDED by scripts/bots.ps1 (keeper + on/off/restart/status via a Scheduled
+# Task). Do NOT run both - two keepers would duplicate bots. Kept only as a manual
+# fallback, trimmed to the ENABLED universe (XAUUSD + US100; US500/XAGUSD disabled).
+#
+# Keeps the enabled ORB live traders running.
 # Checks every 60s; per symbol, if no python "orb live --symbol <SYM>" process
 # is alive, restarts that symbol with its tuned config. Logs to watchdog.log.
 # Stop: create a file named STOP_TRADING in the project root (stops the
@@ -17,13 +21,8 @@ $bots = @(
             "--qty 0.04 --stop-min 2.6 --stop-max 5.2 --max-daily-loss 110 $common" },
   @{ sym = "US100.ecn"; out = "live_us100_signals.log"; err = "live_us100_engine.log";
      args = "-m orb live --source orb.feeds.mt5feed:us100_live --symbol US100.ecn " +
-            "--qty 0.40 --stop-min 15 --stop-max 30 --max-daily-loss 60 --quarter-filter q2q3 $common" },
-  @{ sym = "US500.ecn"; out = "live_us500_signals.log"; err = "live_us500_engine.log";
-     args = "-m orb live --source orb.feeds.mt5feed:us500_live --symbol US500.ecn " +
-            "--qty 1.5 --stop-min 4 --stop-max 8 --max-daily-loss 60 --quarter-filter q2q3 $common" },
-  @{ sym = "XAGUSD.ecn"; out = "live_xag_signals.log"; err = "live_xag_engine.log";
-     args = "-m orb live --source orb.feeds.mt5feed:xagusd_live --symbol XAGUSD.ecn " +
-            "--qty 0.01 --stop-min 0.10 --stop-max 0.20 --max-daily-loss 60 --quarter-filter q2q3 $common" }
+            "--qty 0.40 --stop-min 15 --stop-max 30 --max-daily-loss 60 --quarter-filter q2q3 $common" }
+  # US500.ecn / XAGUSD.ecn DISABLED (see scripts/bots.ps1 $ENABLED to re-enable).
 )
 
 while ($true) {

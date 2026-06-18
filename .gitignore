@@ -18,6 +18,7 @@ venv/
 *.log
 macro_state.json
 *.tmp
+log_backups/
 
 # generated market data (regenerable via scripts/fetch_mt5_history.py)
 /data/
