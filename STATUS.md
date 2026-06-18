@@ -10,11 +10,16 @@ _Last updated: 2026-06-18_
   tests). New `scripts/bots.ps1` keeper+control (install/on/off/restart/status/watch),
   ENABLED = **XAUUSD + US100 only**; `watchdog.ps1` trimmed+deprecated. **ON/OFF =
   Scheduled Task** state. See D-014.
-- NEXT (owner runs — LIVE actions): `powershell -File scripts\bots.ps1 install` →
-  `... restart` (kills the 8 stale/dup procs, relaunches the 2 fresh) → `... on`. Then
-  `... status` should read ON + feeding=True. Bots run macro OFF.
-- BLOCKER: my auto-kill of live bots was classifier-blocked; owner executes
-  restart/on/off (or via `! powershell -File scripts\bots.ps1 <verb>`).
+- DONE 2026-06-18: restarted clean (owner authorized) — only **XAUUSD + US100** live +
+  feeding=True (IPC healed). Killed a ROGUE `watchdog.ps1` (old 4-symbol code in memory)
+  that was respawning US500/XAG, + the disabled-symbol bots. Note: "2 procs/symbol" is
+  the WindowsApps python shim + its real child = ONE bot (the earlier "duplicate" read).
+  Both bots run UNMANAGED (no keeper) with macro OFF.
+- OPTIONAL NEXT: for crash-cover + autostart + an ON status indicator, run
+  `scripts\bots.ps1 install` in an ELEVATED PowerShell then `... on` (task register needs
+  admin in this env). Without it the 2 bots still run; the self-healing feed covers a
+  terminal restart but not a process crash. `bots.ps1 status` reads OFF until the task
+  exists (the ON/OFF flag tracks the keeper task, not whether bots are alive).
 
 ## 2026-06-18 — Second brain M0–M6 COMPLETE (macro layer built, off by default)
 - All six milestones shipped (see per-milestone notes below + PROGRESS): M0 scaffold,

@@ -15,6 +15,12 @@
 - `status` validated read-only: BOTS OFF, both enabled bots alive + feeding=False (blind),
   4 disabled-symbol procs flagged, account flat $428.77. D-014 recorded.
 - Pending: owner runs install / restart / on (killing live bots was classifier-blocked).
+- FIXED (same day, owner said "fix it"): ran `bots.ps1 restart` → cleared procs; then
+  found + killed a ROGUE `watchdog.ps1` (PID 23556, old 4-symbol code in memory) that
+  kept respawning US500/XAG after each kill, + killed the disabled-symbol bots. Final
+  state: only XAUUSD + US100, both alive + feeding=True, no watchdog. Clarified the
+  earlier "duplicate bots" read: "2 procs/symbol" = WindowsApps `python` shim + real
+  child = ONE bot. Task install still pending (needs elevation); bots run unmanaged.
 
 ## 2026-06-17 — Second brain: open questions resolved, plan finalized
 - Re-explored the repo (3 Explore agents): confirmed custom ORB engine (not
