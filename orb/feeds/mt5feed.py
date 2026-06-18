@@ -20,10 +20,27 @@ from ..models import Candle, OrbError
 log = logging.getLogger("orb.feeds.mt5")
 
 TIMEFRAME_M1 = 1  # mt5.TIMEFRAME_M1
+RECONNECT_AFTER = 3  # consecutive no-rate polls before re-initializing the IPC link
 
 
 class Mt5FeedError(OrbError):
     pass
+
+
+def _reconnect(mt5, symbol: str) -> bool:
+    """Tear down + re-establish the terminal IPC link (terminal was restarted).
+
+    A terminal restart silently invalidates the python<->terminal pipe, after
+    which copy_rates_from_pos fails forever with (-10001, 'IPC send failed').
+    shutdown()+initialize() re-attaches to the now-running terminal."""
+    try:
+        mt5.shutdown()
+    except Exception:  # noqa: BLE001 — link may already be dead
+        pass
+    try:
+        return bool(mt5.initialize() and mt5.symbol_select(symbol, True))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 async def stream_candles(
@@ -55,12 +72,24 @@ async def stream_candles(
 
     offset: int | None = None if tz_offset_sec == "auto" else int(tz_offset_sec)
     last_emitted: int | None = None  # epoch of last yielded bar open
+    fail_streak = 0
     while True:
         rates = mt5.copy_rates_from_pos(symbol, TIMEFRAME_M1, 0, 3)
         if rates is None or len(rates) < 2:
-            log.warning("no_rates %s %s", symbol, mt5.last_error())
+            fail_streak += 1
+            log.warning("no_rates %s %s (streak=%d)", symbol, mt5.last_error(),
+                        fail_streak)
+            if fail_streak >= RECONNECT_AFTER:
+                if _reconnect(mt5, symbol):
+                    log.warning("mt5_reconnect ok %s", symbol)
+                    fail_streak = 0
+                else:
+                    log.warning("mt5_reconnect failed %s %s", symbol,
+                                mt5.last_error())
+                    await asyncio.sleep(poll_sec * 5)  # back off while terminal down
             await asyncio.sleep(poll_sec)
             continue
+        fail_streak = 0
         if offset is None:
             # A LIVE forming bar opened <=~1 min ago in UTC, so (forming - now)
             # equals the broker TZ offset: a small whole number of hours

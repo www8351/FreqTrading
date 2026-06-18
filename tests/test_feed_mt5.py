@@ -15,9 +15,13 @@ def bar(t, o, h, l, c, v=10):
 class FakeMt5:
     def __init__(self, batches):
         self.batches = list(batches)
+        self.reconnects = 0
 
     def initialize(self):
         return True
+
+    def shutdown(self):
+        self.reconnects += 1
 
     def symbol_select(self, symbol, enable):
         return True
@@ -73,6 +77,22 @@ def test_auto_offset_defers_on_stale_bars():
     assert len(out) == 1
     assert out[0].close == 2.2                 # closed bar of the fresh batch
     assert out[0].ts.timestamp() == NOW - 65   # offset locked to 0, true UTC
+
+
+def test_reconnects_after_ipc_failure():
+    # 3 None polls (dead IPC, e.g. terminal restart) -> feed re-initializes the
+    # link, then resumes emitting closed bars normally.
+    t0 = 1765360740
+    fake = FakeMt5([
+        None, None, None,                                          # IPC dead
+        [bar(t0, 1, 2, 0.5, 1.5), bar(t0 + 60, 1.5, 3, 1, 2)],     # recovered
+        [bar(t0, 1, 2, 0.5, 1.5), bar(t0 + 60, 1.5, 3, 1, 2.5),
+         bar(t0 + 120, 2.5, 4, 2, 3)],
+    ])
+    candles = asyncio.run(take(stream_candles(mt5=fake, poll_sec=0,
+                                              tz_offset_sec=0), 2))
+    assert [c.close for c in candles] == [1.5, 2.5]
+    assert fake.reconnects >= 1
 
 
 def test_init_failure_raises():
