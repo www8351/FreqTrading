@@ -14,12 +14,24 @@ log = logging.getLogger("orb.riskguard")
 
 
 class DailyLossBreaker:
-    def __init__(self, max_daily_loss: float) -> None:
-        if max_daily_loss <= 0:
+    """Halt after the day's drawdown reaches the cap. The cap is either a flat
+    account-currency amount (``max_daily_loss``) or a percentage of the day's
+    starting balance (``max_daily_loss_pct``). Percentage mode tracks compounding
+    equity: the cap is recomputed from each new day's opening balance."""
+
+    def __init__(self, max_daily_loss: float | None = None, *,
+                 max_daily_loss_pct: float | None = None) -> None:
+        if max_daily_loss is None and max_daily_loss_pct is None:
+            raise ValueError("one of max_daily_loss / max_daily_loss_pct required")
+        if max_daily_loss is not None and max_daily_loss <= 0:
             raise ValueError("max_daily_loss must be > 0")
+        if max_daily_loss_pct is not None and max_daily_loss_pct <= 0:
+            raise ValueError("max_daily_loss_pct must be > 0")
         self.max_daily_loss = max_daily_loss
+        self.max_daily_loss_pct = max_daily_loss_pct
         self._day: date | None = None
         self._day_start: float = 0.0
+        self._day_cap: float = float(max_daily_loss or 0.0)
         self._delta: float = 0.0
         self._halted = False
 
@@ -31,19 +43,29 @@ class DailyLossBreaker:
     def day_pnl(self) -> float:
         return 0.0 if self._day is None else self._delta
 
+    @property
+    def day_cap(self) -> float:
+        """The active loss cap for the current day (flat or pct-derived)."""
+        return self._day_cap
+
     def update(self, day: date, balance: float) -> bool:
         """Feed the current UTC date + balance; returns True while halted."""
         if day != self._day:
             self._day = day
             self._day_start = balance
+            if self.max_daily_loss_pct is not None:
+                self._day_cap = balance * (self.max_daily_loss_pct / 100.0)
+            else:
+                self._day_cap = self.max_daily_loss
             if self._halted:
                 log.info("daily_loss_breaker_reset day=%s start=%s", day, balance)
             self._halted = False
         self._delta = balance - self._day_start
-        if not self._halted and self._day_start - balance >= self.max_daily_loss:
+        if not self._halted and self._day_start - balance >= self._day_cap:
             self._halted = True
-            log.warning("DAILY_LOSS_HALT day=%s start=%s now=%s loss=%.2f",
-                        day, self._day_start, balance, self._day_start - balance)
+            log.warning("DAILY_LOSS_HALT day=%s start=%s now=%s loss=%.2f cap=%.2f",
+                        day, self._day_start, balance,
+                        self._day_start - balance, self._day_cap)
         return self._halted
 
 

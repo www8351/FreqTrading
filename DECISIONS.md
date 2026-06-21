@@ -1,5 +1,125 @@
 # DECISIONS
 
+## D-021 — Brain.md/Brain_X.md retired; strategy spec rebased on the Pine files
+- **Date:** 2026-06-21
+- **Context:** Owner deleted `Brain.md` (SMC/ICT methodology narrative) and `Brain_X.md`
+  (machine-readable strategy brain) and asked to base the strategy spec **only on the two
+  supplied Pine indicators** (`AMD_pro_v1.pine`, `Ture_Open_Price.pine`).
+- **Decided / done:**
+  - New **`STRATEGY.md`** = single source of truth for strategy intent, derived only from the
+    pines (True Opens, AMD/PO3 sweep+CISD, Quarters mapping, entry model, risk, and the honest
+    no-edge verdict from D-016…D-020). Replaces Brain_X.md's role. Not parsed by the bot.
+  - **All "brain" text refs stripped** (comments/docstrings/help-strings/labels only — zero
+    functional identifiers): `orb/macroguard.py`, `orb/quarters.py`, `orb/cli.py`,
+    `orb/svp/sizing.py`, `macro/*`, `scripts/sim_realistic.py` (`report` label),
+    `scripts/backtest_symbols.py`, `tests/test_macroguard.py`. Macro "second brain" renamed
+    → "macro layer". `PLAN_FUNDAMENTAL_BRAIN.md` → `PLAN_MACRO_LAYER.md` (git mv).
+  - **Live ORB bots untouched** (owner choice): all edits behavior-neutral — **226 tests green**.
+  - Historical dated entries in PROGRESS/STATUS/DECISIONS that mention Brain_X are **left intact**
+    (timestamped record; rewriting history violates the lifecycle protocol).
+- **Status:** final. Brain docs recoverable from git history if ever needed.
+
+## D-020 — SVP 15m short-only "edge" does NOT replicate; D-019 win RETRACTED
+- **Date:** 2026-06-21
+- **Context:** D-019 promoted SVP 15m short-only on a +48.6%/PF1.50 result (one TwelveData
+  window, n=39). Pulled fresh data via `fetch_mt5_history.py` to grow the sample + validate.
+- **Two findings:**
+  1. **Real tick volume == TPO fallback, byte-identical** (same n, net%, PF, maxDD at every
+     spread). The long-standing "0 tick volume in CSVs" caveat is MOOT for edge-rotation — the
+     D-shape/VA detection doesn't depend on volume vs time-at-price. Caveat retired.
+  2. **The edge does not replicate.** Same 15m short-only, $0.10, 3% risk, across windows:
+     TwelveData 0321-0612 (n39) +48.6%/PF1.50; TwelveData 0303-0612 (n54) −7.3%/PF0.91;
+     MT5 real-vol 0309-0619 (n45) −24.9%/PF0.71. Shifting the start ~2 weeks flips the sign;
+     real broker data is the worst. = **sample noise / overfit, not edge.**
+- **Broker M1 retention caps at ~100k bars (~3 months)** — cannot pull a larger XAUUSD sample
+  to settle it. But the existing windows already disagree by SIGN, which is itself conclusive.
+- **Decided:** **D-019 is RETRACTED.** SVP 15m short-only has no stable edge; NOT promoted,
+  NOT live. The honest net verdict across D-016/D-018/D-019/D-020: no variant of SVP or the
+  sweep model shows a replicable edge on XAUUSD. The 2000% goal is not reachable with these.
+  Next real lever would be a different instrument or a structurally different signal — not
+  another parameter/window tweak (that path is exhausted and risks more overfitting).
+
+## D-019 — Spread assumption corrected to $0.10; SVP 15m SHORT-only is viable
+- **Date:** 2026-06-21
+- **Context:** Owner challenged the $1.10 spread used in D-016/D-018 ("spread is $0.10 why
+  1.10?"). D-016 had read broker "10-12 pip" as pip=$0.10 → $1.00-1.20. Owner states the real
+  XAUUSD round-turn spread is **$0.10**. This invalidates the cost basis of D-016 and D-018.
+- **Re-tested SVP across $0.10-$0.50 (3% risk, 10% halt, $7/lot, 14wk XAUUSD):**
+  - **SVP 15m SHORT-only = robustly profitable:** $0.10 +48.6%/PF1.50/maxDD28%; $0.30 +37%/
+    PF1.37/DD29%; $0.50 +37%/PF1.35/DD30%. Survives the whole realistic range; dies ~$0.6-0.9;
+    −37% by $1.10. **This is the project's first cost-robust positive result.**
+  - 5m short-only: +100-190% but maxDD 158-180% = ruin → rejected.
+  - both-direction: still net-negative (VAL/LONG fade bleeds).
+  - Sweep model (D-018) @ $0.10: only marginal (best PF ~1.15, +8%); not the winner.
+- **Decided:** (a) **$1.10 is retired as the cost basis** — use the owner's real spread
+  (confirm exact value; bracket $0.10-0.50 holds regardless). (b) D-016/D-018 "does-not-survive"
+  verdicts are **conditional on $1.10 and now SUPERSEDED**. (c) SVP 15m short-only promoted to
+  **validation stage** (NOT live yet) — blockers: n=39 small sample (need more data + forward
+  test), 0-tick-volume CSV (TPO fallback ≠ live volume). Revisitable once validated.
+
+## D-018 — Sweep-reversal model does NOT survive honest gold costs (accepted)
+- **Date:** 2026-06-21
+- **Context:** Owner asked to port the Pine sweep strategy (D-017) into the Python harness
+  for cost-true numbers, targeting 2000% over ~1000 trades, RRR 1:2–1:10, TF 1/3/5/10/15.
+- **Built:** `scripts/backtest_sweep.py` (additive; `sim_realistic.py` byte-identical).
+- **Verdict (XAUUSD 14wk, spread $1.10, 1% risk, bias on):** unprofitable on every TF×RRR.
+  Best market = 15m/rr10 = −8.4% (PF 0.90); best limit = 15m/rr10 = −22.7% (PF 0.57). 1m worst
+  (−40 to −60%). Break-even spread ≈ $0.20–$0.50 (PF 0.98–0.99) — BELOW real gold cost. Edge
+  only with bias OFF at fantasy $0.20 (5m/rr5 +43.7%, but PF 1.09 / maxDD 87.6% = account-killer).
+- **Conclusion:** Same wall as SVP (D-016) — market/limit reversal scalping on gold is
+  cost-fragile; spread eats the edge. **2000% target not achievable** with this model on this
+  instrument at honest costs. NOT promoted, NOT live. Revisitable only with materially lower
+  costs or a structurally different edge (not a tweak). Tool kept for future cost studies.
+
+## D-017 — Turn the 2 ICT indicators into a Pine strategy (accepted)
+- **Date:** 2026-06-21
+- **Context:** Owner added `Ture_Open_Price.pine` + `AMD_pro_v1.pine` (both indicators, no
+  trade logic) and asked for a money-making strategy backtested 1m/3m/5m/10m/15m on XAUUSD,
+  RRR 1:2–1:10, target framed as 2000%/1000 trades.
+- **Decided:**
+  - **Engine = Pine** (TradingView Strategy Tester), NOT the Python `sim_realistic.py` harness.
+    Rejected Python/both: owner chose the native-to-the-files TV path. Consequence: backtest
+    is owner-run in TradingView; this CLI cannot execute it.
+  - **Symbol = XAUUSD.** Entry fill = **both** Limit and Market via an input toggle.
+  - **Trigger = candle CLOSE** beyond the level (CISD reclaim), not a wick touch.
+  - **Model = True-Open Sweep Reversal:** bias (price vs NY True Open) + HTF prior-high/low
+    sweep + close-confirmation reclaim + stop beyond sweep wick + fixed-RRR target.
+  - **Costs stay realistic** in the strategy header ($7 commission, 20-tick slippage). The
+    2000% target is treated as a *measured outcome*, not optimized toward — explicitly to
+    avoid the D-016 curve-fit-that-dies-live trap (market entries lose at $1.10 gold spread).
+- **Status:** Strategy file shipped (`True_Open_Sweep_Strategy.pine`). Revisitable: if owner
+  wants honest spread-true numbers, port the same logic into the Python harness (limit-at-shelf
+  lever from D-016). File is additive — no existing code touched.
+
+## D-016 — SVP risk model (3%/10%) + realistic-cost re-test verdict (accepted)
+- **Date:** 2026-06-19
+- **Context:** The D-015 build's headline (PF 1.61) used a $0.25 spread + 5% risk and a
+  maxDD ($3.2k) that was 321% of the $1k sim balance. Owner imposed realistic terms:
+  **3% risk/trade, 10% daily loss, $7/lot commission, 10-12 pip spread.**
+- **Pip convention (decided):** in this project 1 gold "pip" = **$0.10** (the CLI
+  `--stop-min 2` = $0.20 = "20p" / 10 points). So **10-12 pips = $1.00-1.20 spread**;
+  primary test value **$1.10**. (Rejected the alt reading pip=$0.01 → $0.10-0.12; owner
+  confirmed the $1.10 wide/honest interpretation.)
+- **Changes (all additive; ORB path byte-identical; 226 tests green):**
+  - `DailyLossBreaker` gains an optional **percent** cap (`max_daily_loss_pct`) = pct of
+    each UTC day's opening balance (recomputed daily so it tracks compounding equity) +
+    a `day_cap` accessor; the original flat positional API is unchanged.
+  - SVP `risk_pct` default **5.0 → 3.0**.
+  - `sim_realistic.py`: `aggregate_candles` (1m→5m/15m, UTC-aligned buckets) + `--timeframe`;
+    `metrics()`/`report()` add **maxDD%**; `--start-balance` / `--max-daily-loss-pct`;
+    `min_session_bars` auto-scales per timeframe.
+- **Verdict — SVP Edge-Rotation does NOT survive realistic gold costs.** At spread $1.10
+  (14wk XAUUSD, 3%/10%): 1m PF 0.91, 5m PF 0.92, 15m PF 0.80 — all net negative. Break-even
+  spread ≈ **$0.55 (5m) / $0.62 (15m)**; even at a tight $0.20-0.40 the edge is thin
+  (PF ~1.1-1.2). The risk model DID work: maxDD fell 321% → **49% (15m)** — higher timeframe
+  is materially safer on drawdown.
+- **Root cause + next lever (not yet done):** SVP uses **market** entries (half-spread paid
+  on entry AND exit). A mean-reversion fade should use a **limit at the VAH/VAL shelf**
+  (maker fill as price tags the level), ~halving entry slippage. That is the top next
+  experiment before any further SVP work.
+- **Status:** SVP remains **research-stage, off by default, NOT live**. Revisitable after
+  the limit-entry re-test and a real MT5 tick-volume backtest (see D-015 / D-005).
+
 ## D-015 — SVP "Edge Rotation" as a standalone parallel strategy module (accepted)
 - **Date:** 2026-06-19
 - **Decision (owner-approved):** Build Session Volume Profile (SVP) as a NEW,

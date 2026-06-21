@@ -1,0 +1,146 @@
+//@version=6
+// =============================================================================
+//  True-Open Sweep Reversal  —  Strategy  (Pine v6)
+//  Fuses two indicators into one backtestable model:
+//    * Ture_Open_Price.pine  -> bias (price vs NY True Open) + reclaim levels (TDO/NY)
+//    * AMD_pro_v1.pine        -> ERL liquidity sweep (prior HTF high/low) + CISD reclaim
+//
+//  Setup: HTF liquidity gets swept, then the signal candle CLOSES back across the
+//  level (close-confirmation = CISD reclaim) in the direction of bias. Stop beyond
+//  the sweep wick, target at a fixed Reward:Risk. Entry fill = Market or Limit.
+//
+//  Backtest: set chart to 1 / 3 / 5 / 10 / 15 min on XAUUSD, read Strategy Tester
+//  Net Profit %, # trades, Profit Factor, Max DD %, Win %. Sweep rr 2..10.
+//
+//  Costs are modeled (commission + slippage). They are NOT cosmetic — leave them
+//  realistic. Reported % is only honest with real fill costs in place.
+// =============================================================================
+strategy("True-Open Sweep Reversal", "TO-Sweep", overlay = true,
+     initial_capital      = 1000,
+     default_qty_type     = strategy.percent_of_equity,
+     default_qty_value    = 10,
+     commission_type      = strategy.commission.cash_per_order,
+     commission_value     = 7.0,
+     slippage             = 20,
+     pyramiding           = 0,
+     calc_on_every_tick   = false,
+     process_orders_on_close = true,
+     max_lines_count      = 50,
+     max_labels_count     = 50)
+
+// =============================================================================
+//  INPUTS
+// =============================================================================
+gSIG = "Signal"
+htfTF        = input.timeframe("240", "HTF for liquidity (ERL)", group = gSIG, tooltip = "Higher timeframe whose prior high/low is the liquidity pool to sweep. 240 = 4H.")
+reclaimMode  = input.string("Prior-HTF extreme", "Reclaim level", options = ["Prior-HTF extreme", "TDO", "NY Open"], group = gSIG, tooltip = "Level the candle must CLOSE back across after the sweep. Prior-HTF extreme = the swept high/low itself (Turtle-Soup style).")
+useBias      = input.bool(true, "Bias filter (vs NY True Open)", group = gSIG, tooltip = "Longs only when price > NY True Open, shorts only when <. OFF = take both regardless.")
+useSession   = input.bool(false, "Restrict to 06:00-12:00 NY", group = gSIG, tooltip = "Optional killzone filter. OFF = trade all hours (more trades toward the 1000 sample).")
+
+gTRD = "Trade"
+entryMode    = input.string("Limit", "Entry fill", options = ["Limit", "Market"], group = gTRD, tooltip = "Limit = rest at the reclaim level, fills on retrace (pays spread once). Market = enter at signal close (pays spread twice).")
+rr           = input.float(3.0, "Reward : Risk", minval = 1.0, maxval = 20.0, step = 0.5, group = gTRD, tooltip = "Target distance as a multiple of the stop distance. Sweep 2..10 to compare.")
+stopBufTicks = input.int(50, "Stop buffer (ticks)", minval = 0, group = gTRD, tooltip = "Extra distance beyond the sweep wick for the stop. 50 ticks = $0.50 on gold.")
+riskPct      = input.float(1.0, "Risk % of equity / trade", minval = 0.1, maxval = 20.0, step = 0.1, group = gTRD)
+usePartial   = input.bool(false, "70% partial at +2R", group = gTRD, tooltip = "Matches the project risk preference. OFF keeps per-RRR numbers clean for comparison.")
+limitTTL     = input.int(20, "Limit order TTL (bars)", minval = 1, group = gTRD, tooltip = "Cancel an unfilled limit after this many bars.")
+
+// =============================================================================
+//  HTF LIQUIDITY (non-repaint: prior CLOSED bar via [1], lookahead off)
+// =============================================================================
+[pHi, pLo] = request.security(syminfo.tickerid, htfTF, [high[1], low[1]], lookahead = barmerge.lookahead_off)
+
+// =============================================================================
+//  TRUE OPENS (NY 07:30 for bias; midnight NY for TDO)
+// =============================================================================
+f_isTime(h, m) => not na(time) and hour(time, "America/New_York") == h and minute(time, "America/New_York") == m
+
+var float nyOpen = na
+if f_isTime(7, 30)
+    nyOpen := open
+
+var float tdo = na
+if f_isTime(0, 0)
+    tdo := open
+
+inSession = not useSession or not na(time(timeframe.period, "0600-1200", "America/New_York"))
+
+// =============================================================================
+//  SIGNAL  (sweep + close-confirmation reclaim, in bias direction)
+// =============================================================================
+bool sweptDn = not na(pLo) and low  < pLo     // took liquidity below
+bool sweptUp = not na(pHi) and high > pHi      // took liquidity above
+
+float longLevel  = reclaimMode == "TDO" ? tdo : reclaimMode == "NY Open" ? nyOpen : pLo
+float shortLevel = reclaimMode == "TDO" ? tdo : reclaimMode == "NY Open" ? nyOpen : pHi
+
+bool biasBull = not useBias or (not na(nyOpen) and close > nyOpen)
+bool biasBear = not useBias or (not na(nyOpen) and close < nyOpen)
+
+bool longSig  = inSession and sweptDn and not na(longLevel)  and close > longLevel  and biasBull
+bool shortSig = inSession and sweptUp and not na(shortLevel) and close < shortLevel and biasBear
+
+// =============================================================================
+//  PRICES  (entry / stop / target)
+// =============================================================================
+float buf = stopBufTicks * syminfo.mintick
+
+float longEntry  = entryMode == "Market" ? close : longLevel
+float shortEntry = entryMode == "Market" ? close : shortLevel
+
+float longSL  = low  - buf                      // beyond the sweep wick
+float shortSL = high + buf
+
+float longRisk  = longEntry  - longSL
+float shortRisk = shortEntry - shortSL
+
+float longTP  = longEntry  + rr * longRisk
+float shortTP = shortEntry - rr * shortRisk
+
+float riskMoney = strategy.equity * riskPct / 100.0
+float longQty   = longRisk  > 0 ? riskMoney / longRisk  : na
+float shortQty  = shortRisk > 0 ? riskMoney / shortRisk : na
+
+// =============================================================================
+//  ORDERS
+// =============================================================================
+if longSig and strategy.position_size == 0 and longRisk > 0 and not na(longQty)
+    if entryMode == "Market"
+        strategy.entry("L", strategy.long, qty = longQty)
+    else
+        strategy.entry("L", strategy.long, qty = longQty, limit = longEntry)
+    if usePartial
+        strategy.exit("L-tp1", "L", qty_percent = 70, stop = longSL, limit = longEntry + 2.0 * longRisk)
+        strategy.exit("L-tp2", "L", stop = longSL, limit = longTP)
+    else
+        strategy.exit("L-x", "L", stop = longSL, limit = longTP)
+
+if shortSig and strategy.position_size == 0 and shortRisk > 0 and not na(shortQty)
+    if entryMode == "Market"
+        strategy.entry("S", strategy.short, qty = shortQty)
+    else
+        strategy.entry("S", strategy.short, qty = shortQty, limit = shortEntry)
+    if usePartial
+        strategy.exit("S-tp1", "S", qty_percent = 70, stop = shortSL, limit = shortEntry - 2.0 * shortRisk)
+        strategy.exit("S-tp2", "S", stop = shortSL, limit = shortTP)
+    else
+        strategy.exit("S-x", "S", stop = shortSL, limit = shortTP)
+
+// Cancel stale unfilled limits (TTL).
+var int lastSigBar = na
+if longSig or shortSig
+    lastSigBar := bar_index
+if entryMode == "Limit" and strategy.position_size == 0 and not na(lastSigBar) and (bar_index - lastSigBar) >= limitTTL
+    strategy.cancel("L")
+    strategy.cancel("S")
+
+// =============================================================================
+//  VISUALS
+// =============================================================================
+plot(nyOpen, "NY True Open", color = color.new(color.blue,   0), style = plot.style_linebr)
+plot(tdo,    "TDO",          color = color.new(color.gray,   0), style = plot.style_linebr)
+plot(pHi,    "Prior HTF High (ERL)", color = color.new(color.teal, 40), style = plot.style_stepline)
+plot(pLo,    "Prior HTF Low (ERL)",  color = color.new(color.red,  40), style = plot.style_stepline)
+
+plotshape(longSig,  "Long sweep+reclaim",  style = shape.triangleup,   location = location.belowbar, color = color.teal, size = size.tiny)
+plotshape(shortSig, "Short sweep+reclaim", style = shape.triangledown, location = location.abovebar, color = color.red,  size = size.tiny)

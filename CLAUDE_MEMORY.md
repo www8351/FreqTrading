@@ -24,7 +24,7 @@
 - Engine stays broker-agnostic: execution lives in `orb/broker/`, exit
   management in `orb/babysitter.py`, risk guards in `orb/riskguard.py` —
   all consumed by the CLI live loop, never imported by the engine.
-- Macro "second brain" (D-013): the `macro/` sidecar is a SEPARATE process and
+- Macro layer (D-013): the `macro/` sidecar is a SEPARATE process and
   MAY use third-party deps; it is never imported by `orb/`. Its consumer
   `orb/macroguard.py` is pure stdlib (reads `macro_state.json` only) and, like the
   other guards, is consumed by the CLI live loop, never by the engine. Fail-safe:

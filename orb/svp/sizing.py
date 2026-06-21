@@ -5,7 +5,7 @@ shelf), size the lot so the loss at that stop is ``risk_pct`` of balance — and
 never more than an optional hard dollar cap (the remaining daily-loss budget).
 
 Pure: takes broker specs as plain floats, no MetaTrader5 import. Reuses the
-sizing math from ``Brain_X.md`` / ``scripts/symbol_specs.py``:
+sizing math from ``scripts/symbol_specs.py`` (see STRATEGY.md §4):
     value_per_move = tick_value / tick_size      ($ per 1.0 price move per lot)
     lot = risk_$ / (stop_distance * value_per_move)
 then snapped down to the broker volume step.

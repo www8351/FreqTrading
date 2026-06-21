@@ -1,4 +1,4 @@
-"""MacroGuard — the live bot's read-only consumer of the macro "second brain".
+"""MacroGuard — the live bot's read-only consumer of the macro layer.
 
 A separate sidecar (the ``macro/`` package) writes a single ``macro_state.json``;
 each per-symbol ``orb live`` process reads it through a :class:`MacroGuard` and
@@ -30,7 +30,7 @@ third-party deps and never gets imported here.
       }
     }
 
-Fail-safe principle: a missing/stale/corrupt brain **never** opens a position and
+Fail-safe principle: a missing/stale/corrupt macro state **never** opens a position and
 never (under the default ``allow`` policy) blocks one — worst case is today's
 behavior. See DECISIONS D-013.
 """

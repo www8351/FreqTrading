@@ -173,7 +173,7 @@ def test_risk_off_false_when_neutral(tmp_path):
 
 
 def test_risk_off_false_when_stale(tmp_path):
-    # blackout active but state stale -> must NOT act on a blind brain
+    # blackout active but state stale -> must NOT act on blind macro state
     g = make_guard(tmp_path, with_blackout(reason="FOMC", gen=STALE_GEN))
     assert g.risk_off_now()[0] is False
 

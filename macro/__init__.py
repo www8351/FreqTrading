@@ -1,4 +1,4 @@
-"""macro/ — the "second brain" sidecar.
+"""macro/ — the macro layer sidecar.
 
 A standalone local process that fetches macro/fundamental data (economic
 calendar, FRED actuals, GDELT, sentiment, market proxies), scores it, and writes

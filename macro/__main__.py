@@ -1,4 +1,4 @@
-"""``python -m macro`` — second-brain sidecar CLI.
+"""``python -m macro`` — macro layer sidecar CLI.
 
 Commands:
 - ``emit``     write a neutral (no-veto) macro_state.json (M0; offline).
@@ -27,7 +27,7 @@ def _now():
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="macro", description="macro second-brain sidecar")
+    p = argparse.ArgumentParser(prog="macro", description="macro layer sidecar")
     p.add_argument("--log-level", default="INFO")
     sub = p.add_subparsers(dest="command", required=True)
 

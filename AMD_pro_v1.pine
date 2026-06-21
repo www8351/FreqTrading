@@ -1,0 +1,252 @@
+//@version=6
+// =============================================================================
+//  AMD Pro Indicator  —  v1.2  (Pine Script v6)  —  HTF PO3 Projection + Engine
+//  Projects the developing HTF (default 4H) candle into the right margin with a
+//  dotted range footprint, open/EQ levels, High/Low/Last label and countdown.
+//  PO3 engine: AMD phase coloring, ERL liquidity-sweep highlight, CISD marker.
+//
+//  Commercial build. Invite-Only / Whop access = TradingView publish settings
+//  (NOT enforceable in Pine). Disclaimer in the projection label tooltip.
+// =============================================================================
+indicator("AMD Pro Indicator", "AMD Pro", overlay = true, max_boxes_count = 50, max_lines_count = 50, max_labels_count = 50)
+
+const string DISCLAIMER = "AMD Pro is an analytical tool, not financial advice. Trading involves substantial risk of loss. Past performance does not guarantee future results. You are solely responsible for your decisions."
+
+// =============================================================================
+//  INPUTS
+// =============================================================================
+gHTF      = "HTF"
+htfTF       = input.timeframe("240", "HTF timeframe", group = gHTF, tooltip = "Higher timeframe projected as the PO3 candle. 240 = 4H.")
+autoLabel   = input.bool(true, "Auto label from HTF", group = gHTF, tooltip = "ON = derive prefix (4H/1D/1W…) from the HTF. OFF = use manual prefix below.")
+tfLabelMan  = input.string("4H", "Manual prefix", group = gHTF)
+
+gPROJ     = "Projection"
+offsetBars = input.int(20, "Right-margin offset (bars)", minval = 1, maxval = 200, group = gPROJ)
+bodyWidth  = input.int(8,  "Projected body width (bars)", minval = 2, maxval = 50, group = gPROJ)
+showRange  = input.bool(true, "Dotted range footprint", group = gPROJ)
+showWick   = input.bool(true, "Projected wick", group = gPROJ)
+showOpen   = input.bool(true, "Open level (dotted)", group = gPROJ)
+showEQ     = input.bool(true, "Equilibrium 50% (dotted)", group = gPROJ)
+
+gCOL      = "Color"
+colorMode  = input.string("PO3 Phase", "Color mode", options = ["Monochrome", "Up / Down", "PO3 Phase"], group = gCOL, tooltip = "Monochrome = single solid color. Up/Down = green up, red down. PO3 Phase = AMD (green/red expansion, orange manipulation, purple accumulation).")
+colMono    = input.color(#1b1b1b, "Mono color", group = gCOL)
+colBull    = input.color(#26a69a, "Bull / expansion up", group = gCOL, inline = "c")
+colBear    = input.color(#ef5350, "Bear / expansion down", group = gCOL, inline = "c")
+colManip   = input.color(#ffa726, "Manipulation (sweep)", group = gCOL)
+colWeak    = input.color(#7e57c2, "Accumulation / weak", group = gCOL)
+bodyTransp = input.int(0,  "Body transparency", minval = 0, maxval = 100, group = gCOL)
+lineCol    = input.color(color.new(color.gray, 20), "Range / level lines", group = gCOL)
+
+gENG      = "PO3 Engine"
+showHL     = input.bool(true, "Prior HTF High/Low (ERL)", group = gENG, tooltip = "Draws the previous HTF candle's high/low — the external liquidity (ERL) pools.")
+showSweep  = input.bool(true, "Highlight sweep", group = gENG, tooltip = "Color the ERL line when the developing candle takes it.")
+showCISD   = input.bool(true, "CISD marker", group = gENG, tooltip = "Marks Change In State of Delivery — price reclaiming the prior HTF open against its close.")
+
+gLBL      = "Label"
+showLabel     = input.bool(true, "Side label (High/Low/Last)", group = gLBL)
+showCountdown = input.bool(true, "Countdown line", group = gLBL)
+showPhase     = input.bool(false, "Phase line", group = gLBL)
+showStage     = input.bool(true,  "C1–C4 stage line", group = gLBL)
+labelSize     = input.string("Normal", "Label size", options = ["Tiny", "Small", "Normal", "Large"], group = gLBL)
+
+// =============================================================================
+//  HTF DATA (non-repaint)
+// =============================================================================
+// Current developing candle (updates intrabar = live, not repaint).
+[htfO, htfH, htfL, htfC, htfCloseT] = request.security(syminfo.tickerid, htfTF, [open, high, low, close, time_close], lookahead = barmerge.lookahead_off)
+// Previous *closed* candle ([1] = role C4) — locked, used for ERL/CISD/fractal.
+[pOpen, pHi, pLo, pClose] = request.security(syminfo.tickerid, htfTF, [open[1], high[1], low[1], close[1]], lookahead = barmerge.lookahead_off)
+// Older closed candles for the C1–C4 fractal: roles C3=[2], C2=[3], C1=[4].
+[r3o, r3h, r3l, r3c, r2o, r2h, r2l, r2c, r1h, r1l] = request.security(syminfo.tickerid, htfTF, [open[2], high[2], low[2], close[2], open[3], high[3], low[3], close[3], high[4], low[4]], lookahead = barmerge.lookahead_off)
+
+isNewHTF = timeframe.change(htfTF)
+var int curStartBar = bar_index
+if isNewHTF
+    curStartBar := bar_index
+
+// =============================================================================
+//  PO3 ENGINE  (phase / sweep / CISD)
+// =============================================================================
+float liveRng  = math.max(htfH - htfL, syminfo.mintick)
+float liveBody = math.abs(htfC - htfO)
+bool  up        = htfC >= htfO
+bool  expanding = liveBody / liveRng > 0.5
+
+bool sweptUp = not na(pHi) and htfH > pHi    // took prior HTF high (ERL above)
+bool sweptDn = not na(pLo) and htfL < pLo    // took prior HTF low  (ERL below)
+bool swept   = sweptUp or sweptDn
+
+string phase = expanding ? "Distribution" : swept ? "Manipulation" : "Accumulation"
+color phaseCol = expanding ? (up ? colBull : colBear) : swept ? colManip : colWeak
+
+// CISD: prior candle closed one way, price now reclaims its open the other way.
+bool cisdBull = showCISD and not na(pOpen) and pClose < pOpen and close > pOpen and close[1] <= pOpen
+bool cisdBear = showCISD and not na(pOpen) and pClose > pOpen and close < pOpen and close[1] >= pOpen
+var string cisdStr = "—"
+if cisdBull
+    cisdStr := "Bull"
+if cisdBear
+    cisdStr := "Bear"
+
+// --- C1–C4 fractal (roles: C1=[4], C2=[3], C3=[2], C4=[1]) -----------------
+bool hasSeq = not na(r1l) and not na(r2c) and not na(r3c) and not na(pClose)
+// C2 reversal: swept C1 extreme, closed back inside C1 range.
+bool c2RevBull = hasSeq and r2l < r1l and r2c > r1l
+bool c2RevBear = hasSeq and r2h > r1h and r2c < r1h
+bool c2Rev     = c2RevBull or c2RevBear
+// C3 continuation: engulf C2 body when C2 gave no reversal.
+bool c3EngBull = hasSeq and not c2Rev and r3c > math.max(r2o, r2c)
+bool c3EngBear = hasSeq and not c2Rev and r3c < math.min(r2o, r2c)
+bool seqBull   = c2RevBull or c3EngBull
+bool seqBear   = c2RevBear or c3EngBear
+// C4 expansion: role-C4 ([1]) ran beyond the C3 range in the sequence direction.
+bool c4ExpBull = seqBull and pClose > r3h
+bool c4ExpBear = seqBear and pClose < r3l
+// Equilibrium law: C4 wick must respect 50% of the C3 range.
+float c3Rng = hasSeq ? math.max(r3h - r3l, syminfo.mintick) : na
+float eqLvl3 = hasSeq ? r3l + 0.5 * c3Rng : na
+bool eqOK   = seqBull ? (pLo >= eqLvl3) : seqBear ? (pHi <= eqLvl3) : true
+bool eqViol = (c4ExpBull or c4ExpBear) and not eqOK
+string stageStr = not hasSeq ? "—" : (c4ExpBull or c4ExpBear) ? ("C4 expansion" + (eqViol ? " ⚠EQ" : "")) : (c3EngBull or c3EngBear) ? "C3 continuation" : c2Rev ? "C2 reversal" : "C1 base"
+
+// Body color by chosen mode.
+color bodyCol = switch colorMode
+    "Monochrome" => colMono
+    "Up / Down"  => up ? colBull : colBear
+    "PO3 Phase"  => phaseCol
+    => colMono
+
+// =============================================================================
+//  LABEL PREFIX (auto from HTF, or manual)
+// =============================================================================
+f_tfLabel(string tf) =>
+    int s = int(timeframe.in_seconds(tf))
+    s % 604800 == 0 ? str.tostring(s / 604800) + "W" : s % 86400 == 0 ? str.tostring(s / 86400) + "D" : s % 3600 == 0 ? str.tostring(s / 3600) + "H" : str.tostring(s / 60) + "m"
+string tfLabel = autoLabel ? f_tfLabel(htfTF) : tfLabelMan
+
+// =============================================================================
+//  COUNTDOWN TO HTF CLOSE (varip, integer-safe)
+// =============================================================================
+f_pad2(int v) => (v < 10 ? "0" : "") + str.tostring(v)
+varip string cdStr = "--:--:--"
+float msLeft = htfCloseT - timenow
+if msLeft > 0
+    int secs = int(msLeft / 1000)
+    int h = int(secs / 3600)
+    int m = int((secs - h * 3600) / 60)
+    int sc = secs - h * 3600 - m * 60
+    cdStr := f_pad2(h) + ":" + f_pad2(m) + ":" + f_pad2(sc)
+
+string lSz = switch labelSize
+    "Tiny"   => size.tiny
+    "Small"  => size.small
+    "Normal" => size.normal
+    "Large"  => size.large
+    => size.normal
+
+// =============================================================================
+//  DRAWABLES (current developing HTF candle only)
+// =============================================================================
+var box  rangeBox = na
+var box  bodyBox  = na
+var line wickLn   = na
+var line openLn   = na
+var line eqLn     = na
+var line erlHi    = na
+var line erlLo    = na
+var line cisdLn   = na
+var label sideLbl = na
+
+if barstate.islast
+    int   rightEdge = bar_index + offsetBars
+    int   bodyLeft  = rightEdge
+    int   bodyRight = rightEdge + bodyWidth
+    int   wickX     = int(math.round((bodyLeft + bodyRight) / 2))
+    float bodyTop   = math.max(htfO, htfC)
+    float bodyBot   = math.min(htfO, htfC)
+    float eqLvl     = (htfH + htfL) / 2.0
+    color cBody     = color.new(bodyCol, bodyTransp)
+
+    // --- Dotted range footprint --------------------------------------------
+    if showRange
+        if na(rangeBox)
+            rangeBox := box.new(curStartBar, htfH, bodyRight, htfL, xloc = xloc.bar_index, border_color = lineCol, border_style = line.style_dotted, border_width = 1, bgcolor = color.new(color.gray, 100), force_overlay = true)
+        else
+            box.set_lefttop(rangeBox, curStartBar, htfH)
+            box.set_rightbottom(rangeBox, bodyRight, htfL)
+            box.set_border_color(rangeBox, lineCol)
+
+    // --- Solid projected candle body ---------------------------------------
+    if na(bodyBox)
+        bodyBox := box.new(bodyLeft, bodyTop, bodyRight, bodyBot, xloc = xloc.bar_index, border_color = cBody, bgcolor = cBody, force_overlay = true)
+    else
+        box.set_lefttop(bodyBox, bodyLeft, bodyTop)
+        box.set_rightbottom(bodyBox, bodyRight, bodyBot)
+        box.set_bgcolor(bodyBox, cBody)
+        box.set_border_color(bodyBox, cBody)
+
+    // --- Projected wick -----------------------------------------------------
+    if showWick
+        if na(wickLn)
+            wickLn := line.new(wickX, htfH, wickX, htfL, xloc = xloc.bar_index, color = cBody, width = math.max(1, int(bodyWidth / 3)), force_overlay = true)
+        else
+            line.set_xy1(wickLn, wickX, htfH)
+            line.set_xy2(wickLn, wickX, htfL)
+            line.set_color(wickLn, cBody)
+
+    // --- Open level (dotted) ------------------------------------------------
+    if showOpen
+        if na(openLn)
+            openLn := line.new(curStartBar, htfO, bodyRight, htfO, xloc = xloc.bar_index, color = lineCol, style = line.style_dotted, force_overlay = true)
+        else
+            line.set_xy1(openLn, curStartBar, htfO)
+            line.set_xy2(openLn, bodyRight, htfO)
+
+    // --- Equilibrium 50% (dotted) ------------------------------------------
+    if showEQ
+        if na(eqLn)
+            eqLn := line.new(curStartBar, eqLvl, bodyRight, eqLvl, xloc = xloc.bar_index, color = color.new(color.orange, 30), style = line.style_dotted, force_overlay = true)
+        else
+            line.set_xy1(eqLn, curStartBar, eqLvl)
+            line.set_xy2(eqLn, bodyRight, eqLvl)
+
+    // --- ERL: prior HTF High / Low (highlight when swept) -------------------
+    if showHL and not na(pHi)
+        color cHi = (showSweep and sweptUp) ? colManip : color.new(colBull, 50)
+        color cLo = (showSweep and sweptDn) ? colManip : color.new(colBear, 50)
+        if na(erlHi)
+            erlHi := line.new(curStartBar, pHi, bodyRight, pHi, xloc = xloc.bar_index, color = cHi, style = line.style_dashed, force_overlay = true)
+            erlLo := line.new(curStartBar, pLo, bodyRight, pLo, xloc = xloc.bar_index, color = cLo, style = line.style_dashed, force_overlay = true)
+        else
+            line.set_xy1(erlHi, curStartBar, pHi)
+            line.set_xy2(erlHi, bodyRight, pHi)
+            line.set_color(erlHi, cHi)
+            line.set_xy1(erlLo, curStartBar, pLo)
+            line.set_xy2(erlLo, bodyRight, pLo)
+            line.set_color(erlLo, cLo)
+
+    // --- CISD marker: line at the reclaimed prior open ----------------------
+    if showCISD and (cisdBull or cisdBear) and not na(pOpen)
+        color cC = cisdBull ? colBull : colBear
+        if na(cisdLn)
+            cisdLn := line.new(curStartBar, pOpen, bodyRight, pOpen, xloc = xloc.bar_index, color = cC, width = 2, force_overlay = true)
+        else
+            line.set_xy1(cisdLn, curStartBar, pOpen)
+            line.set_xy2(cisdLn, bodyRight, pOpen)
+            line.set_color(cisdLn, cC)
+
+    // --- Side label: High / Low / Last (+ countdown / phase) ----------------
+    if showLabel
+        string txt = "High - " + str.tostring(htfH, format.mintick) + "\n" + "Low - " + str.tostring(htfL, format.mintick) + "\n" + "Last - " + str.tostring(htfC, format.mintick)
+        if showPhase
+            txt += "\n" + phase + (cisdStr != "—" ? " · CISD " + cisdStr : "")
+        if showStage
+            txt += "\n" + stageStr
+        if showCountdown
+            txt += "\n" + cdStr
+        if na(sideLbl)
+            sideLbl := label.new(bodyRight, bodyTop, txt, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(#11161f, 0), textcolor = color.white, size = lSz, tooltip = DISCLAIMER, force_overlay = true)
+        else
+            label.set_xy(sideLbl, bodyRight, bodyTop)
+            label.set_text(sideLbl, txt)

@@ -48,7 +48,7 @@ class SvpConfig:
     absorb_wick_mult: float = 2.0
 
     # risk / sizing (applied downstream in cli.on_signal)
-    risk_pct: float = 5.0
+    risk_pct: float = 3.0
 
     # babysitter passthrough (exit management)
     partial_frac: float = 0.7

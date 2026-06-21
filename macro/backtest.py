@@ -2,7 +2,7 @@
 
 Answers the only question that matters before risking money: *would the macro
 filter have helped?* It overlays the EXACT live veto logic on a baseline trade
-list — for each trade it reconstructs the MacroState that the brain would have
+list — for each trade it reconstructs the MacroState that the macro layer would have
 emitted at that trade's timestamp (``build_state(events, trade.ts)``) and runs the
 shared ``decide_entry`` — then reports profit factor / net / win-rate BEFORE vs
 AFTER the filter, per symbol.

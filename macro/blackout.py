@@ -1,7 +1,8 @@
 """Blackout-window math over a calendar of ``RawEvent``s. Pure + stdlib.
 
 A high-impact event at ``ts`` blacks out entries over ``[ts - pre_min, ts + post_min]``
-(default 30/30, aligned with Brain_X ``pre_market_blackout``). ``active_blackout``
+(default 30/30, aligned with the ``pre_market_blackout`` rule in STRATEGY.md).
+``active_blackout``
 tells the daemon whether *now* sits in any such window (the consumer just reads the
 resulting ``blackout.active`` flag); ``upcoming_events`` fills the forward
 ``events[]`` list in the MacroState for transparency.

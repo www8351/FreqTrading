@@ -41,6 +41,11 @@ ADDON_FRAC = 0.8
 LIMIT_TTL_SEC = 30 * 60
 SPIKE_MIN_AGE_SEC = 120
 
+# SVP timeframe aggregation: 1m input -> these bar sizes.
+_TF_MINUTES = {"1m": 1, "5m": 5, "15m": 15}
+# Bars before a profile is "ready" (~60-90 min wall-clock per timeframe).
+_TF_MIN_BARS = {"1m": 20, "5m": 12, "15m": 6}
+
 
 # --------------------------------------------------------------------------- #
 @dataclass
@@ -209,6 +214,33 @@ def load_csv(paths: list[str]) -> list[Candle]:
     return [rows[k] for k in sorted(rows)]
 
 
+def aggregate_candles(candles: list[Candle], minutes: int) -> list[Candle]:
+    """Aggregate 1m bars into N-minute bars, buckets aligned to the UTC hour
+    (5m at :00,:05,...; 15m at :00,:15,:30,:45). OHLC = first-open / max-high /
+    min-low / last-close, volume summed, bucket ts = bucket start. Time gaps
+    separate buckets naturally; the trailing partial bucket is emitted.
+    ``minutes <= 1`` is an identity pass."""
+    if minutes <= 1:
+        return candles
+    out: list[Candle] = []
+    key: datetime | None = None
+    o = h = l = cl = vol = 0.0
+    for c in candles:
+        floored = c.ts.replace(minute=c.ts.minute - c.ts.minute % minutes,
+                               second=0, microsecond=0)
+        if key is None:
+            key, o, h, l, cl, vol = floored, c.open, c.high, c.low, c.close, c.volume
+        elif floored == key:
+            h, l, cl, vol = max(h, c.high), min(l, c.low), c.close, vol + c.volume
+        elif floored > key:
+            out.append(Candle(ts=key, open=o, high=h, low=l, close=cl, volume=vol))
+            key, o, h, l, cl, vol = floored, c.open, c.high, c.low, c.close, c.volume
+        # floored < key: out-of-order straggler (load_csv sorts) -> drop
+    if key is not None:
+        out.append(Candle(ts=key, open=o, high=h, low=l, close=cl, volume=vol))
+    return out
+
+
 def run(candles: list[Candle], qty: float, spread: float, comm: float,
         max_daily_loss: float = 110.0, stop_min: float = 2.0,
         stop_max: float = 4.0, value_per_move: float = USD_PER_LOT_PER_DOLLAR
@@ -254,21 +286,27 @@ def run(candles: list[Candle], qty: float, spread: float, comm: float,
     return sim.closed
 
 
-def run_svp(candles: list[Candle], risk_pct: float = 5.0, spread: float = 0.25,
-            comm: float = 7.0, max_daily_loss: float = 110.0,
+def run_svp(candles: list[Candle], risk_pct: float = 3.0, spread: float = 0.25,
+            comm: float = 7.0, max_daily_loss_pct: float = 10.0,
             value_per_move: float = USD_PER_LOT_PER_DOLLAR,
             start_balance: float = 1000.0, vol_min: float = 0.01,
             vol_step: float = 0.01, vol_max: float = 50.0,
-            tpo_fallback: bool = True, **svp_ov) -> list[dict]:
+            tpo_fallback: bool = True, timeframe: str = "1m",
+            **svp_ov) -> list[dict]:
     """Execution-true SVP backtest: market entries, structural stops, dynamic
-    5%-risk sizing, babysitter exits (70% at +2R, chase the rest). The new
+    risk_pct sizing, babysitter exits (70% at +2R, chase the rest). The new
     market entry is opened AFTER on_bar so it is never SL-checked on its own bar.
+
+    Daily loss halts at ``max_daily_loss_pct`` of the day's starting balance.
+    ``min_session_bars`` auto-scales to the timeframe unless overridden in svp_ov.
 
     ``tpo_fallback`` defaults True: the historical CSVs carry no tick volume, so
     the profile is built from time-at-price (TPO). Live uses real tick volume.
     """
     from orb.svp import SvpConfig, SvpEngine, compute_lot
 
+    if "min_session_bars" not in svp_ov:
+        svp_ov["min_session_bars"] = _TF_MIN_BARS.get(timeframe, 20)
     cfg = SvpConfig(
         session_open_utc=candles[0].ts.time().replace(second=0, microsecond=0),
         session_len_min=1440, risk_pct=risk_pct, tpo_fallback=tpo_fallback,
@@ -279,7 +317,7 @@ def run_svp(candles: list[Candle], risk_pct: float = 5.0, spread: float = 0.25,
               value_per_move=value_per_move)
     sitter = Babysitter(partial_frac=cfg.partial_frac, partial_at_r=cfg.partial_at_r)
     spike = SpikeCancel(ratio=2.5)
-    breaker = DailyLossBreaker(max_daily_loss)
+    breaker = DailyLossBreaker(max_daily_loss_pct=max_daily_loss_pct)
 
     for c in candles:
         sig = engine.on_candle(c)
@@ -289,7 +327,7 @@ def run_svp(candles: list[Candle], risk_pct: float = 5.0, spread: float = 0.25,
         sim.on_bar(c, sitter, is_spike, halted)     # exits for existing positions
         if (sig is not None and sig.kind is SignalKind.ENTRY and sig.stop
                 and not halted):
-            remaining = max(0.0, max_daily_loss + breaker.day_pnl)
+            remaining = max(0.0, breaker.day_cap + breaker.day_pnl)
             lot = compute_lot(bal, cfg.risk_pct, sig.price, sig.stop,
                               value_per_move, vol_min, vol_step, vol_max,
                               max_risk=remaining)
@@ -300,11 +338,11 @@ def run_svp(candles: list[Candle], risk_pct: float = 5.0, spread: float = 0.25,
 
 
 # --------------------------------------------------------------------------- #
-def metrics(trades: list[dict]) -> dict:
+def metrics(trades: list[dict], start_balance: float = 1000.0) -> dict:
     n = len(trades)
     if not n:
         return {"n": 0, "pnl": 0.0, "win": 0.0, "avg": 0.0, "pf": 0.0,
-                "dd": 0.0}
+                "dd": 0.0, "dd_pct": 0.0}
     pnl = sum(t["pnl"] for t in trades)
     wins = [t for t in trades if t["pnl"] > 0]
     gw = sum(t["pnl"] for t in wins)
@@ -314,15 +352,17 @@ def metrics(trades: list[dict]) -> dict:
         eq += t["pnl"]
         peak = max(peak, eq)
         dd = max(dd, peak - eq)
+    dd_pct = (dd / start_balance * 100.0) if start_balance > 0 else 0.0
     return {"n": n, "pnl": pnl, "win": 100.0 * len(wins) / n, "avg": pnl / n,
-            "pf": (gw / -gl) if gl < 0 else float("inf"), "dd": dd}
+            "pf": (gw / -gl) if gl < 0 else float("inf"), "dd": dd,
+            "dd_pct": dd_pct}
 
 
-def report(name: str, trades: list[dict]) -> None:
-    m = metrics(trades)
+def report(name: str, trades: list[dict], start_balance: float = 1000.0) -> None:
+    m = metrics(trades, start_balance)
     print(f"{name:<26} n={m['n']:<5} pnl=${m['pnl']:+10.2f} "
           f"win%={m['win']:5.1f} avg=${m['avg']:+7.2f} PF={m['pf']:5.2f} "
-          f"maxDD=${m['dd']:8.2f}")
+          f"maxDD=${m['dd']:8.2f} ({m['dd_pct']:5.1f}%)")
 
 
 def trades_to_records(trades: list[dict], symbol: str) -> list[dict]:
@@ -353,7 +393,16 @@ def main() -> None:
                     help="symbol tag for emitted trades (default XAUUSD)")
     ap.add_argument("--strategy", choices=("orb", "svp"), default="orb",
                     help="orb (default) or svp (Session Volume Profile Edge Rotation)")
-    ap.add_argument("--svp-risk-pct", dest="svp_risk_pct", type=float, default=5.0)
+    ap.add_argument("--timeframe", choices=tuple(_TF_MINUTES), default="1m",
+                    help="aggregate 1m input to this bar size before running "
+                         "(svp only; 1m = no aggregation)")
+    ap.add_argument("--svp-risk-pct", dest="svp_risk_pct", type=float, default=3.0,
+                    help="SVP risk per trade as %% of balance (default 3.0)")
+    ap.add_argument("--start-balance", dest="start_balance", type=float,
+                    default=1000.0, help="starting account balance (default 1000)")
+    ap.add_argument("--max-daily-loss-pct", dest="max_daily_loss_pct", type=float,
+                    default=10.0, help="halt for the rest of the UTC day after "
+                    "losing this %% of the day's starting balance (svp; default 10)")
     ap.add_argument("--svp-enable-lvn", dest="svp_enable_lvn", action="store_true")
     ap.add_argument("--emit-trades", dest="emit_trades",
                     help="write entry trades as JSON for scripts/backtest_macro.py")
@@ -368,12 +417,27 @@ def main() -> None:
           f"qty={args.qty}\n")
 
     if args.strategy == "svp":
+        tf_min = _TF_MINUTES[args.timeframe]
+        if tf_min > 1:
+            candles = aggregate_candles(candles, tf_min)
+            print(f"# aggregated to {args.timeframe}: bars={len(candles)}")
+        print(f"# risk={args.svp_risk_pct}%/trade daily={args.max_daily_loss_pct}% "
+              f"start=${args.start_balance:.0f}\n")
+        sb = args.start_balance
         trades = run_svp(candles, risk_pct=args.svp_risk_pct, spread=args.spread,
-                         comm=args.commission, enable_lvn=args.svp_enable_lvn)
-        report("svp edge-rotation", trades)
+                         comm=args.commission,
+                         max_daily_loss_pct=args.max_daily_loss_pct,
+                         start_balance=sb, timeframe=args.timeframe,
+                         enable_lvn=args.svp_enable_lvn)
+        report("svp edge-rotation", trades, sb)
         print("\nby setup:")
         for r in sorted({t["reason"] for t in trades}):
-            report(f"  {r}", [t for t in trades if t["reason"] == r])
+            report(f"  {r}", [t for t in trades if t["reason"] == r], sb)
+        print("\nby direction:")
+        for d in ("LONG", "SHORT"):
+            sub = [t for t in trades if t["dir"] == d]
+            if sub:
+                report(f"  {d}", sub, sb)
         if args.emit_trades:
             write_trades_json(trades_to_records(trades, args.symbol),
                               args.emit_trades)
@@ -391,7 +455,7 @@ def main() -> None:
            [t for t in trades if t["day_q"] == "Q3"])
     report("Q3+Q4 (day cycle)",
            [t for t in trades if t["day_q"] in ("Q3", "Q4")])
-    report("brainmd fair-value rule",
+    report("fair-value rule",
            [t for t in trades
             if (t["dir"] == "SHORT" and t["fair"] == "premium")
             or (t["dir"] == "LONG" and t["fair"] == "discount")])

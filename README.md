@@ -35,7 +35,7 @@ re-deriving context.
 - `babysitter.py` — per-ticket exit manager (limit mode): 70% off at +2R, stop
   chases the remainder, tighten-only.
 - `riskguard.py` — daily loss circuit breaker + momentum-spike limit cancel.
-- `macroguard.py` — pure stdlib consumer of the macro "second brain": reads
+- `macroguard.py` — pure stdlib consumer of the macro layer: reads
   `macro_state.json`, returns entry veto / qty-scale / risk-off (off by default).
 - `trueopen.py` — True Open levels (TDO / session / week) + bias / premium-discount.
 - `quarters.py` — Quarters Theory cycles (day + 90m), Q2 true-open fair value.
@@ -45,15 +45,18 @@ re-deriving context.
   to ORB, off by default, `--strategy svp`, magic 20260620). `profile.py` builds the
   POC/VAH/VAL/HVN/LVN histogram (tick-volume TPO even-split); `strategy.py`
   (`SvpEngine`) fades VAH/VAL→POC on balanced days + LVN breaks; `sizing.py` sizes
-  structural-stop trades to 5% risk. **v1 not yet profitable on volume-less history
-  (TPO proxy) — research/tuning stage, not live-ready. See D-015.**
+  structural-stop trades to 3% risk (10% daily cap). **Does NOT survive realistic gold
+  costs:** at a $1.10 spread ($7/lot comm) the edge is net-negative on 1m/5m/15m
+  (break-even spread ≈ $0.55-0.62); only marginal below that. Higher timeframe is far
+  safer on drawdown (maxDD 49% on 15m vs 321% before the risk fix). Top next lever:
+  switch market entries → limit-at-shelf. Research-stage, off by default. See D-015, D-016.
 
-## Second brain (`macro/`, sidecar)
+## Macro layer (`macro/`, sidecar)
 - Separate local process (own deps allowed) that fetches macro/fundamental data
   (economic calendar, FRED, GDELT, sentiment, market proxies) and writes a single
   `macro_state.json`. Each `orb live` reads it via `orb/macroguard.py` as an entry
   veto / qty-scale / risk-off layer. **Off by default** (`--macro-mode off`);
-  fail-safe (brain down ⇒ trade as today). See D-013 + `PLAN_FUNDAMENTAL_BRAIN.md`.
+  fail-safe (macro layer down ⇒ trade as today). See D-013 + `PLAN_MACRO_LAYER.md`.
 - M0–M3 shipped: contract + pure guard; M1 = ForexFactory calendar collector
   (FairEconomy JSON feed, no key) + high-impact blackout windows (NFP/CPI/FOMC,
   30/30) + `python -m macro run` daemon; M2 = surprise scorer (`macro/scorer.py` +
@@ -74,8 +77,9 @@ re-deriving context.
   --tp-rrr 2 --session-len 1440 --rearm --rearm-range rebuild --trueopen-filter deadzone`
 - SVP (research, demo only when ready): `python -m orb live --strategy svp --source
   orb.feeds.mt5feed:xauusd_live --broker mt5 --symbol XAUUSD.ecn --max-daily-loss 110`.
-  Backtest (TPO profile on volume-less CSVs): `python scripts/sim_realistic.py
-  data/xauusd_1m_*.csv --strategy svp`.
+  Backtest (TPO profile on volume-less CSVs; realistic costs): `python
+  scripts/sim_realistic.py data/xauusd_1m_*.csv --strategy svp --timeframe 15m
+  --spread 1.10 --commission 7 --start-balance 1000 --max-daily-loss-pct 10`.
 - Backtests: `python -m orb replay <csv>`; realistic execution sim (limit fills,
   babysitter, spread+commission): `python scripts/sim_realistic.py data/*.csv`;
   filter studies: `python scripts/backtest_trueopen.py`.
@@ -97,8 +101,9 @@ re-deriving context.
 - All architecture and rule changes must be reflected in the lifecycle files.
 
 ## Useful links / references
-- `Brain.md` — Quarters Theory methodology (time cycles, true opens, fair value).
-- Pine sources of ported indicators: `orb/Ture_Open_Price.pine`, `orb/Sav FX.pine`.
+- `STRATEGY.md` — pine-derived strategy spec (methodology, entry model, honest verdict).
+  Replaces the deleted `Brain.md` / `Brain_X.md` (2026-06-21).
+- Pine sources: `AMD_pro_v1.pine`, `Ture_Open_Price.pine` (+ `orb/Sav FX.pine`).
 
 ## Tone notes
 Direct, concise, technical. No filler.

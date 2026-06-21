@@ -1,4 +1,4 @@
-"""Multi-symbol realistic backtest for the new Brain_X.md parameters.
+"""Multi-symbol realistic backtest for the per-symbol parameters (see STRATEGY.md).
 
 Runs the live limit-mode pipeline (sim_realistic.run) per symbol with that
 symbol's value-per-move, iron stop band, and measured spread, then reports

@@ -656,7 +656,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "this many account-currency units (e.g. 110)")
     lp.add_argument("--macro-mode", dest="macro_mode",
                     choices=("off", "shadow", "filter", "guard"), default="off",
-                    help="fundamental/macro second-brain layer: off (default, no "
+                    help="fundamental/macro layer: off (default, no "
                          "effect), shadow (log decisions only), filter (veto/scale "
                          "entries), guard (filter + risk-off close on blackout/"
                          "war-spike)")

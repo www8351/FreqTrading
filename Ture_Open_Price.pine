@@ -1,0 +1,297 @@
+//@version=6
+indicator("OT Trades", overlay = true, max_boxes_count = 50, max_labels_count = 50, max_lines_count = 10)
+
+// Global Settings (visible)
+customLineColor = input.color(#000000, "True Open", group = "Global Settings")
+
+// Input for custom sessionTypeText size and width
+sessionTypeTextSize = input.string("small", "Session Type Text Size", options=["tiny", "small", "normal", "large"], group="Text Settings")
+
+// On/Off switches for each open line
+show90MinuteCycleOpen = input.bool(true,  "90 Minute Cycle Open", group="Open Lines")
+showTrueNewYorkOpen   = input.bool(true,  "True New York Open",   group="Open Lines")
+showTrueDayOpen       = input.bool(true,  "TDO",                  group="Open Lines")
+showTrueWeekOpen      = input.bool(true,  "TWO",                  group="Open Lines")
+showTrueMonthOpen     = input.bool(true,  "TMO",                  group="Open Lines")
+
+// TMO fallback window (holiday/closed): how many days forward to look for 18:00 NY
+tmoFallbackDays = input.int(10, "TMO Holiday Fallback Days", minval = 1, maxval = 30, group="Open Lines")
+
+// Alerts: fire when price crosses a true-open line
+gALERT   = "Alerts"
+alertOn  = input.bool(false, "Enable cross alerts", group = gALERT, tooltip = "Master switch. Each line gets BOTH: (1) a dynamic alert() feed via 'Any alert() function call', and (2) named per-line/direction conditions (e.g. 'TDO ▲ Up') in the Create-Alert dropdown — make each its OWN alert to give it a different sound. The ring itself is chosen in TradingView's alert dialog (Notifications tab), not in Pine.")
+alertSrc = input.string("Close", "Cross source", options = ["Close", "Wick (High/Low)"], group = gALERT)
+alertTDO = input.bool(true, "TDO",               group = gALERT, inline = "a1")
+alertNYO = input.bool(true, "NY/London/PM Open", group = gALERT, inline = "a1")
+alertTWO = input.bool(true, "TWO",               group = gALERT, inline = "a2")
+alert90  = input.bool(true, "90 Min Cycle",      group = gALERT, inline = "a2")
+alertTMO = input.bool(true, "TMO",               group = gALERT)
+
+IsTime(h, m, timezone) =>
+    not na(time) and hour(time, timezone) == h and minute(time, timezone) == m
+
+IsSession(sess, timezone) =>
+    not na(time(timeframe.period, sess, timezone))
+
+is6_00Session  = IsSession("0600-0730", "America/New_York")
+is7_30Session  = IsSession("0730-0900", "America/New_York")
+is9_00Session  = IsSession("0900-1030", "America/New_York")
+is10_30Session = IsSession("1030-1200", "America/New_York")
+
+var int lookahead_bars = 20
+
+// -------------------- TDO --------------------
+var MOPLine  = line.new(na, na, na, na, color = customLineColor, width = 2, style = line.style_solid)
+var MOPLabel = label.new(na, na, text = "TDO", color = color.rgb(120, 123, 134, 100), textcolor = customLineColor, size = size.small, style = label.style_label_left)
+var float trueDayOpen = na
+
+if showTrueDayOpen
+    if IsTime(0, 0, "America/New_York")
+        line.set_xy1(MOPLine, bar_index, open)
+        line.set_xy2(MOPLine, bar_index, open)
+        label.set_xy(MOPLabel, bar_index, open)
+        trueDayOpen := open
+
+    if barstate.islast
+        line.set_x2(MOPLine, bar_index + 20)
+        label.set_x(MOPLabel, bar_index + 20)
+else
+    line.set_xy1(MOPLine, na, na)
+    line.set_xy2(MOPLine, na, na)
+    label.set_xy(MOPLabel, na, na)
+
+// -------------------- True NY / London / PM Open --------------------
+var NYTrueOpenLine  = line.new(na, na, na, na, color = customLineColor, width = 2, style = line.style_solid)
+var NYTrueOpenLabel = label.new(na, na, text = "True New York Open", color = color.rgb(105, 130, 218, 100), textcolor = customLineColor, size = size.small, style = label.style_label_left)
+var float NYTrueOpen = na
+var string nyName = "True New York Open"
+
+if showTrueNewYorkOpen
+    if IsTime(1, 30, "America/New_York") or IsTime(7, 30, "America/New_York") or IsTime(13, 30, "America/New_York")
+        line.set_xy1(NYTrueOpenLine, bar_index, open)
+        line.set_xy2(NYTrueOpenLine, bar_index, open)
+        label.set_xy(NYTrueOpenLabel, bar_index, open)
+        NYTrueOpen := open
+        if IsTime(1, 30, "America/New_York")
+            nyName := "True London Open"
+            label.set_text(NYTrueOpenLabel, nyName)
+        if IsTime(7, 30, "America/New_York")
+            nyName := "True New York Open"
+            label.set_text(NYTrueOpenLabel, nyName)
+        if IsTime(13, 30, "America/New_York")
+            nyName := "True PM Session Open"
+            label.set_text(NYTrueOpenLabel, nyName)
+
+    if barstate.islast
+        line.set_x2(NYTrueOpenLine, bar_index + 20)
+        label.set_x(NYTrueOpenLabel, bar_index + 20)
+else
+    line.set_xy1(NYTrueOpenLine, na, na)
+    line.set_xy2(NYTrueOpenLine, na, na)
+    label.set_xy(NYTrueOpenLabel, na, na)
+
+// -------------------- TWO (shows on ALL timeframes, uses OPEN) --------------------
+var MondayLine  = line.new(na, na, na, na, color = customLineColor, width = 2, style = line.style_solid)
+var MondayLabel = label.new(na, na, text = "TWO", color = #9b27b000, textcolor = customLineColor, size = size.small, style = label.style_label_left)
+var float WeekOpen = na
+
+if showTrueWeekOpen
+    if dayofweek == dayofweek.monday and IsTime(18, 0, "America/New_York")
+        WeekOpen := open
+        line.set_xy1(MondayLine, bar_index, open)
+        line.set_xy2(MondayLine, bar_index, open)
+        label.set_xy(MondayLabel, bar_index, open)
+
+    if barstate.islast
+        line.set_x2(MondayLine, bar_index + lookahead_bars)
+        label.set_x(MondayLabel, bar_index + lookahead_bars)
+else
+    line.set_xy1(MondayLine, na, na)
+    line.set_xy2(MondayLine, na, na)
+    label.set_xy(MondayLabel, na, na)
+
+// -------------------- 90 Minute Cycle Open --------------------
+var ninetyMinuteCycleLine  = line.new(na, na, na, na, color = customLineColor, width = 2, style = line.style_solid)
+var ninetyMinuteCycleLabel = label.new(na, na, text = "90 Minute Cycle True Open", color = #4caf4f00, textcolor = customLineColor, size = size.small, style = label.style_label_left)
+var float ninetyOpen = na
+var string ninetyName = "90 Minute Cycle True Open"
+
+if show90MinuteCycleOpen
+    if IsTime(3, 23, "America/New_York") or IsTime(9, 23, "America/New_York") or IsTime(15, 23, "America/New_York")
+        line.set_xy1(ninetyMinuteCycleLine, bar_index, open)
+        line.set_xy2(ninetyMinuteCycleLine, bar_index, open)
+        label.set_xy(ninetyMinuteCycleLabel, bar_index, open)
+        ninetyOpen := open
+        if IsTime(3, 23, "America/New_York")
+            ninetyName := "03:23 Cycle True Open"
+            label.set_text(ninetyMinuteCycleLabel, ninetyName)
+        if IsTime(9, 23, "America/New_York")
+            ninetyName := "09:23 Cycle True Open"
+            label.set_text(ninetyMinuteCycleLabel, ninetyName)
+        if IsTime(15, 23, "America/New_York")
+            ninetyName := "15:23 Cycle True Open"
+            label.set_text(ninetyMinuteCycleLabel, ninetyName)
+
+    if barstate.islast
+        line.set_x2(ninetyMinuteCycleLine, bar_index + lookahead_bars)
+        label.set_x(ninetyMinuteCycleLabel, bar_index + lookahead_bars)
+else
+    line.set_xy1(ninetyMinuteCycleLine, na, na)
+    line.set_xy2(ninetyMinuteCycleLine, na, na)
+    label.set_xy(ninetyMinuteCycleLabel, na, na)
+
+// -------------------- TMO (Second Sunday 18:00 NY exact; holiday fallback; SAME LENGTH as TDO/TWO) --------------------
+var monthOpenLine  = line.new(na, na, na, na, xloc = xloc.bar_index, color = customLineColor, width = 2, style = line.style_solid)
+var monthOpenLabel = label.new(na, na, text = "TMO", color = #ff990000, textcolor = customLineColor, size = size.small, style = label.style_label_left)
+
+dayMs = 24 * 60 * 60 * 1000
+
+// Second Sunday day-of-month (8..14) in NY (timezone-explicit)
+f_secondSundayDom(_y, _m) =>
+    int out = na
+    for d = 8 to 14
+        tsMid = timestamp("America/New_York", _y, _m, d, 0, 0)
+        if dayofweek(tsMid, "America/New_York") == dayofweek.sunday
+            out := d
+    out
+
+f_prevYear(_y, _m) => _m == 1 ? _y - 1 : _y
+f_prevMonth(_m)    => _m == 1 ? 12 : _m - 1
+
+curY = year(time,  "America/New_York")
+curM = month(time, "America/New_York")
+
+curDom = f_secondSundayDom(curY, curM)
+curTS  = not na(curDom) ? timestamp("America/New_York", curY, curM, curDom, 18, 0) : na
+
+prevY   = f_prevYear(curY, curM)
+prevM   = f_prevMonth(curM)
+prevDom = f_secondSundayDom(prevY, prevM)
+prevTS  = not na(prevDom) ? timestamp("America/New_York", prevY, prevM, prevDom, 18, 0) : na
+
+// Use current month once it has happened; otherwise show previous month
+useTS = (not na(curTS) and time_close >= curTS) ? curTS : prevTS
+
+// Exact-match 18:00 NY on 1m bars; if closed/holiday, try next day 18:00, etc.
+f_tmoOpenExact(_baseTS, _days) =>
+    var float v = na
+    if _baseTS != _baseTS[1]
+        v := na
+    for k = 0 to _days
+        ts = _baseTS + k * dayMs
+        if na(v) and time == ts
+            v := open
+    v
+
+f_tmoTimeExact(_baseTS, _days) =>
+    var int t = na
+    if _baseTS != _baseTS[1]
+        t := na
+    for k = 0 to _days
+        ts = _baseTS + k * dayMs
+        if na(t) and time == ts
+            t := time
+    t
+
+tmoOpen = request.security(syminfo.tickerid, "1", f_tmoOpenExact(useTS, tmoFallbackDays), barmerge.gaps_off, barmerge.lookahead_off)
+tmoTime = request.security(syminfo.tickerid, "1", f_tmoTimeExact(useTS, tmoFallbackDays), barmerge.gaps_off, barmerge.lookahead_off)
+
+// Anchor to the FIRST chart bar that crosses the event time
+tmoOnChart = not na(tmoTime) and time >= tmoTime and nz(time[1], time) < tmoTime
+tmoStartIndex = ta.valuewhen(tmoOnChart, bar_index, 0)
+
+if showTrueMonthOpen and not na(tmoOpen) and not na(tmoStartIndex)
+    // Set at event candle
+    line.set_xy1(monthOpenLine, tmoStartIndex, tmoOpen)
+    line.set_xy2(monthOpenLine, tmoStartIndex, tmoOpen)
+    label.set_xy(monthOpenLabel, tmoStartIndex, tmoOpen)
+
+    // SAME behavior/length as TDO/TWO: stop at last_bar + lookahead_bars
+    if barstate.islast
+        line.set_x2(monthOpenLine, bar_index + lookahead_bars)
+        label.set_x(monthOpenLabel, bar_index + lookahead_bars)
+else
+    line.set_xy1(monthOpenLine, na, na)
+    line.set_xy2(monthOpenLine, na, na)
+    label.set_xy(monthOpenLabel, na, na)
+
+// -------------------- Directional Bias --------------------
+directionalBias = "N/A"
+if is6_00Session or is7_30Session or is9_00Session or is10_30Session
+    directionalBias := open > NYTrueOpen ? "Bullish" : "Bearish"
+
+var directionalBiasLabel = label.new(na, na, text = "Directional Bias: " + directionalBias, color = na, textcolor = customLineColor, size = size.normal, style = label.style_label_left)
+if barstate.islast
+    label.set_x(directionalBiasLabel, bar_index + lookahead_bars)
+    label.set_text(directionalBiasLabel, "Directional Bias: " + directionalBias)
+
+// -------------------- Session Table --------------------
+var sessionTable = table.new(position.bottom_right, 1, 1, bgcolor = #b9b9bab8)
+
+if barstate.islast and not na(trueDayOpen) and not na(NYTrueOpen) and not na(WeekOpen)
+    string sessionTypeText = syminfo.ticker + "  Dead Zone"
+    color  sessionColor    = color.rgb(126, 126, 126, 65)
+
+    if close < trueDayOpen and close < NYTrueOpen and close < WeekOpen
+        sessionTypeText := syminfo.ticker + "  Week Discount"
+        sessionColor := #ba4b4b59
+    else if close > trueDayOpen and close > NYTrueOpen and close > WeekOpen
+        sessionTypeText := syminfo.ticker + "  Week Premium"
+        sessionColor := #4b56ba5a
+    else if close < trueDayOpen and close < NYTrueOpen and close > WeekOpen
+        sessionTypeText := syminfo.ticker + "  Day Discount & Week Dead Zone"
+        sessionColor := #ba4b4b59
+    else if close > trueDayOpen and close > NYTrueOpen and close < WeekOpen
+        sessionTypeText := syminfo.ticker + "  Day premium & Week Dead Zone"
+        sessionColor := #4b56ba5a
+
+    table.cell(sessionTable, 0, 0, sessionTypeText, bgcolor = sessionColor, text_color = color.black, text_size = sessionTypeTextSize)
+
+// -------------------- Cross Alerts --------------------
+// Two delivery paths share one detection pass:
+//   1. alert()         — single dynamic feed ("Any alert() function call").
+//   2. alertcondition  — one named entry per line+direction, so each can be made
+//                        its OWN TradingView alert with its OWN sound/ring.
+// ta.* computed unconditionally so per-call-site series state stays consistent.
+f_cross(float lvl) =>
+    coUp = ta.crossover(close, lvl)
+    coDn = ta.crossunder(close, lvl)
+    wkUp = not na(lvl) and high > lvl and (na(high[1]) or high[1] <= lvl)
+    wkDn = not na(lvl) and low  < lvl and (na(low[1])  or low[1]  >= lvl)
+    useWick = alertSrc == "Wick (High/Low)"
+    [useWick ? wkUp : coUp, useWick ? wkDn : coDn]
+
+// One detection pass per line
+[tdoUp, tdoDn] = f_cross(trueDayOpen)
+[nyoUp, nyoDn] = f_cross(NYTrueOpen)
+[twoUp, twoDn] = f_cross(WeekOpen)
+[n90Up, n90Dn] = f_cross(ninetyOpen)
+[tmoUp, tmoDn] = f_cross(tmoOpen)
+
+alertFreq = alertSrc == "Wick (High/Low)" ? alert.freq_once_per_bar : alert.freq_once_per_bar_close
+
+// Path 1 — dynamic alert() feed (name resolved at runtime, incl. NY/90 variants)
+f_fire(bool en, bool up, bool dn, string nm) =>
+    if alertOn and en and (up or dn)
+        arrow = up ? "▲ Up" : "▼ Down"
+        alert(syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | " + nm + " " + arrow, alertFreq)
+
+f_fire(alertTDO, tdoUp, tdoDn, "TDO")
+f_fire(alertNYO, nyoUp, nyoDn, nyName)
+f_fire(alertTWO, twoUp, twoDn, "TWO")
+f_fire(alert90,  n90Up, n90Dn, ninetyName)
+f_fire(alertTMO, tmoUp, tmoDn, "TMO")
+
+// Path 2 — per-line / per-direction conditions. In the TradingView "Create Alert"
+// dialog each appears as its own entry; assign a different SOUND to each there.
+// Gated by the same Alerts-group toggles (master + per-line + Close/Wick source).
+alertcondition(alertOn and alertTDO and tdoUp, "TDO ▲ Up",   "{{ticker}} @ {{close}} | TDO ▲ Up")
+alertcondition(alertOn and alertTDO and tdoDn, "TDO ▼ Down", "{{ticker}} @ {{close}} | TDO ▼ Down")
+alertcondition(alertOn and alertNYO and nyoUp, "NYO ▲ Up",   "{{ticker}} @ {{close}} | NY/London/PM Open ▲ Up")
+alertcondition(alertOn and alertNYO and nyoDn, "NYO ▼ Down", "{{ticker}} @ {{close}} | NY/London/PM Open ▼ Down")
+alertcondition(alertOn and alertTWO and twoUp, "TWO ▲ Up",   "{{ticker}} @ {{close}} | TWO ▲ Up")
+alertcondition(alertOn and alertTWO and twoDn, "TWO ▼ Down", "{{ticker}} @ {{close}} | TWO ▼ Down")
+alertcondition(alertOn and alert90  and n90Up, "90M ▲ Up",   "{{ticker}} @ {{close}} | 90 Min Cycle ▲ Up")
+alertcondition(alertOn and alert90  and n90Dn, "90M ▼ Down", "{{ticker}} @ {{close}} | 90 Min Cycle ▼ Down")
+alertcondition(alertOn and alertTMO and tmoUp, "TMO ▲ Up",   "{{ticker}} @ {{close}} | TMO ▲ Up")
+alertcondition(alertOn and alertTMO and tmoDn, "TMO ▼ Down", "{{ticker}} @ {{close}} | TMO ▼ Down")

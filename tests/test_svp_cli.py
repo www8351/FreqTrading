@@ -92,7 +92,7 @@ def test_build_svp_config_maps_flags():
 
 def test_build_svp_config_defaults():
     cfg = build_svp_config(_svp_args())
-    assert cfg.ticks_per_row == 10 and cfg.risk_pct == 5.0
+    assert cfg.ticks_per_row == 10 and cfg.risk_pct == 3.0
     assert cfg.enable_edge_rotation is True and cfg.enable_lvn is False
 
 

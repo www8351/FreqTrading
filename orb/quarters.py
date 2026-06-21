@@ -1,5 +1,5 @@
 """Quarters Theory cycles (port of the "Sav FX" TradingView indicator,
-methodology per Brain.md).
+methodology per STRATEGY.md §2.1).
 
 Every cycle splits into four quarters with algorithmic roles:
     Q1 accumulation, Q2 manipulation, Q3 distribution (the tradeable move),
@@ -100,7 +100,7 @@ class QuarterTracker:
         return self.state
 
     def value_zone(self, close: float, cycle: str = "day") -> str | None:
-        """Brain.md fair-value read vs the cycle's True Open (Q2 open):
+        """Fair-value read vs the cycle's True Open (Q2 open):
         premium (above, look for shorts) / discount (below, look for longs)."""
         ref = (self.state.day_q2_open if cycle == "day"
                else self.state.m90_q2_open)
