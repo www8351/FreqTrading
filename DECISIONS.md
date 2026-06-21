@@ -1,5 +1,34 @@
 # DECISIONS
 
+## D-022 — Institutional filter/risk layer on SVP; caps drawdown, does NOT create edge
+- **Date:** 2026-06-21
+- **Context:** Owner asked to add trend filtering + risk management to the SVP edge-rotation
+  strategy ("spike momentum setup") to fix the ~332% drawdown and stop VAL-fade longs losing into
+  the bearish gold trend — explicitly **without altering the VAH/VAL fade entry trigger**. Owner
+  also corrected the spread to the real **$0.10-$0.12** (not the $1.10 from D-016/D-018). Chose to
+  implement in the reusable `orb/svp/` modules so the live bot inherits it (not a backtest-only patch).
+- **Decided / built (all additive, default OFF, entry trigger byte-identical, 226→255 tests green):**
+  - Trend bias gate (Cond. A: session open vs prior-session POC; Cond. B: `SwingStructure` HH/HL vs
+    LH/LL) with modes off/open/structure/both/either — allows LONG only on confirmed bullish bias,
+    SHORT only on bearish; neutral blocks.
+  - ATR-based stop (`atr_stop_mult`·ATR, replaces structural shelf, floor = never tighter than shelf);
+    1% risk sizing (existing `compute_lot`, `--svp-risk-pct 1.0`); daily $/% circuit breaker (existing
+    `DailyLossBreaker`, `--max-daily-loss-pct 2.0`); new `ConsecutiveLossGuard` (stop after N losses/
+    session); breakeven move (`Babysitter.breakeven_at_r`); killzone + open/close blackout; volume/
+    delta confirmation **stub** (off; bypassed on zero-volume data — true delta needs a live feed).
+  - Single gate lives in `SvpEngine._enter` (the shared commit chokepoint); `_edge_rotation` untouched.
+- **Result — XAUUSD 15m, real $0.10 spread, 1%/2%, ATR2.0, BE1R, consec-2:**
+  - **Drawdown fixed (the primary goal):** MT5 real-vol window maxDD **67.9% → 16.1%** (no filter) /
+    **7.9%** (trend=open); the old ~332% (5% risk) is gone.
+  - **No replicable edge.** Same config flips sign by window: TwelveData 0321 +$21.8/PF1.12;
+    TwelveData 0303 +$142.6/PF1.72; **MT5 real-vol −$161.2/PF0.26**. The trend filter HELPS 0303
+    (+$143→+$193) and HURTS 0321 (+$22→−$45) = curve-fit. On honest MT5 data even shorts lose
+    (PF0.73); longs are ruin (0% win). `structure`/`both` block ~all trades (n=0).
+- **Status:** final on the build (feature-complete, reusable, off by default, NOT live). The
+  profitability verdict is **unchanged from D-016…D-020**: risk management caps the drawdown but
+  does not manufacture a positive edge on XAUUSD; the next lever is structural (different instrument
+  / signal), not more filter/param tuning. Revisitable only with a genuinely new signal or market.
+
 ## D-021 — Brain.md/Brain_X.md retired; strategy spec rebased on the Pine files
 - **Date:** 2026-06-21
 - **Context:** Owner deleted `Brain.md` (SMC/ICT methodology narrative) and `Brain_X.md`

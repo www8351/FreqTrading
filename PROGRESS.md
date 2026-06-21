@@ -1,5 +1,60 @@
 # PROGRESS
 
+## 2026-06-21 (pm 5) — Filter + risk-management layer on SVP edge-rotation (D-022)
+- Owner request ("spike momentum setup"): add trend filters + institutional risk management to the
+  SVP edge-rotation strategy, fix the 332% drawdown, stop longs losing into the bearish gold trend,
+  **without touching the VAH/VAL fade entry trigger**. Also corrected the spread to the real
+  **$0.10-$0.12** (not the $1.10 I first cited). Chose reusable modules (config+strategy), live-ready.
+- **Built (all additive, default OFF → 226→255 tests green, entry trigger byte-identical):**
+  - `orb/svp/structure.py` — `SwingStructure` confirmed-fractal swing detector → HH/HL=bull,
+    LH/LL=bear bias (Condition B). 6 tests.
+  - `orb/svp/config.py` — new fields: `trend_filter_mode`, `swing_lookback`, `atr_period`,
+    `atr_stop_mult`, `atr_stop_floor_structural`, `breakeven_at_r`, `killzones`, `block_open_min`,
+    `block_close_min`, `use_delta_confirmation`, `max_consecutive_losses` + validations.
+  - `orb/svp/strategy.py` — feeds `WilderATR`+`SwingStructure`+session-open price each in-session
+    bar; **single gate in `_enter`** vetoes a detected setup on trend bias (Cond. A open-vs-prior-POC
+    + Cond. B structure), killzone/open-close blackout, and the delta-confirmation stub; ATR stop
+    overrides the structural shelf (floor: never tighter than the shelf). `_edge_rotation` unchanged.
+  - `orb/riskguard.py` — `ConsecutiveLossGuard` (per-session streak breaker). `orb/babysitter.py` —
+    `breakeven_at_r` (tighten-only move to entry at N·R). 5+4 tests.
+  - `scripts/sim_realistic.py` — 9 new `--svp-*` flags, killzone parser, consec-loss enforced in
+    `run_svp`, breakeven wired into the babysitter. 13 filter tests + cross-window run.
+- **Validation — XAUUSD 15m, real $0.10 spread, 1% risk, 2% daily, ATR2.0 stop, BE 1R, consec-2:**
+
+  | window | no filter (PnL/PF/maxDD) | trend=open (PnL/PF/maxDD) |
+  |--------|--------------------------|----------------------------|
+  | TwelveData 0321-0612 | +$21.8 / 1.12 / 8.1% | −$45.4 / 0.64 / 7.8% |
+  | TwelveData 0303-0612 | +$142.6 / 1.72 / 6.0% | +$193.5 / 2.87 / 2.4% |
+  | **MT5 real-vol 0309-0619** | **−$161.2 / 0.26 / 16.1%** | **−$79.0 / 0.36 / 7.9%** |
+
+  Old baseline same window (3%/10%, no risk layer): −$669, PF 0.30, **maxDD 67.9%** (longs −$518
+  PF0.13; the historical figure was ~332% at 5% risk). DD now capped to 7.9-16.1%.
+- **What worked:** drawdown control (ATR stop + 1% sizing + 2% daily + consec-2 + breakeven) —
+  durable, instrument-agnostic, the primary ask. **What did NOT:** edge. The sign flips across
+  windows and the trend filter helps one / hurts another = curve-fit, not signal. `structure`/`both`
+  modes block ~everything (n=0) on full-day sessions; `open` (open vs prior POC) is a weak/contrarian
+  proxy in a downtrend so it leaves losing longs in. Killzone gate works (full-day=31 trades, narrow
+  windows→0) but note `session_open_utc` = first-bar time (here 23:36) so set killzones in absolute UTC.
+- Repro: `python scripts/sim_realistic.py data/xauusd_1m_20260309_20260619.csv --strategy svp
+  --timeframe 15m --spread 0.10 --commission 7 --svp-risk-pct 1.0 --max-daily-loss-pct 2.0
+  --svp-atr-stop-mult 2.0 --svp-breakeven-r 1.0 --svp-max-consec-losses 2 [--svp-trend-filter open]`.
+  Logged **D-022**. Live ORB bots + macro layer unaffected; SVP still off by default, NOT live.
+- **TF sweep (added `2m`+`3m` to `--timeframe`; 255 tests green).** Same risk-managed config, no
+  trend filter, $0.10, PnL/PF per window:
+
+  | TF | TwelveData 0321 | TwelveData 0303 | MT5 real-vol |
+  |----|-----------------|-----------------|--------------|
+  | 1m | +$1074 / 3.04 | −$19 / 0.94 | +$79 / 1.30 |
+  | 2m | +$735 / 2.95 | −$5 / 0.98 | −$23 / 0.89 |
+  | 3m | +$269 / 1.80 | −$23 / 0.87 | +$5 / 1.03 |
+  | 5m | −$100 / 0.58 | +$115 / 1.53 | +$36 / 1.31 |
+  | 15m | +$22 / 1.12 | +$143 / 1.72 | −$161 / 0.26 |
+
+  **Every TF flips sign across windows** — no row is green in all three; each window's "best" TF
+  differs (0321→1m, 0303→15m, MT5→5m). Confirms overfit across the whole TF spectrum, not just 15m.
+  The +$1074/PF3.04 at 1m/0321 is a cherry-pick trap (same 1m = −$19 on 0303). **maxDD stayed
+  5.8-16.1% on all 15 runs** → risk layer is TF-agnostic and robust; the edge is not.
+
 ## 2026-06-21 (pm 4) — Retired Brain docs; new STRATEGY.md from Pine files (D-021)
 - Owner deleted `Brain.md` + `Brain_X.md`; wanted the strategy spec built only from the 2 Pine
   indicators. Created **`STRATEGY.md`** (methodology, entry model, risk, WIRED/RESEARCH tags,

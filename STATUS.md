@@ -2,6 +2,39 @@
 
 _Last updated: 2026-06-21_
 
+## 2026-06-21 (pm 5) — Institutional filter/risk layer added to SVP ("spike momentum setup") (D-022)
+- Owner asked to add trend filters + risk management to the SVP edge-rotation strategy (fix the
+  332% DD; longs lost vs the bearish trend) and keep the VAH/VAL fade **entry trigger untouched**.
+  Built ALL of it in the **reusable `orb/svp/` modules** (live bot inherits), entry byte-identical.
+- **Shipped (additive, off by default → ORB + old SVP behavior unchanged; 226→255 tests green):**
+  - `orb/svp/structure.py` `SwingStructure` — fractal HH/HL (bull) vs LH/LL (bear) bias (Cond. B).
+  - `SvpConfig` fields: `trend_filter_mode` (off/open/structure/both/either), `atr_period` +
+    `atr_stop_mult` (ATR stop replaces structural shelf), `atr_stop_floor_structural`,
+    `breakeven_at_r`, `killzones`+`block_open_min`/`block_close_min`, `use_delta_confirmation`,
+    `max_consecutive_losses`.
+  - `SvpEngine._enter` is the single FILTER GATE (trend bias, killzone/blackout, delta stub) +
+    ATR-stop override — `_edge_rotation` trigger is **byte-identical** (tests prove it).
+  - `orb/riskguard.py` `ConsecutiveLossGuard` (session circuit breaker); `Babysitter.breakeven_at_r`.
+  - `scripts/sim_realistic.py`: `--svp-trend-filter/-atr-period/-atr-stop-mult/-breakeven-r/
+    -killzones/-block-open-min/-block-close-min/-use-delta/-max-consec-losses`; consec-loss
+    enforced in `run_svp`. 1% sizing = `--svp-risk-pct 1.0`; 2% daily = `--max-daily-loss-pct 2.0`.
+- **DRAWDOWN FIXED (primary goal).** MT5 real-vol XAUUSD 15m @ real **$0.10** spread, 1%/2%, ATR2.0
+  stop, BE 1R, consec-2: maxDD **67.9% → 16.1%** (no filter) / **7.9%** (trend=open). The old 332%
+  is gone — risk model works as intended.
+- **NO replicable edge (reconfirms D-020), now at the owner's REAL $0.10-$0.12 spread.** Same exact
+  risk-managed config, sign **flips** by data window: TwelveData 0321 **+$21.8**/PF1.12 · TwelveData
+  0303 **+$142.6**/PF1.72 · **MT5 real-vol −$161.2/PF0.26**. Trend filter HELPS one window
+  (0303 +$143→+$193) and HURTS another (0321 +$22→−$45) = fitting noise. On the honest MT5 window
+  even shorts lose (PF 0.73); longs are ruin (0% win, PF 0.00). $0.12 ≈ $0.10 (−$162.8).
+- **Verdict:** delivered the requested institutional layer + capped the drawdown; it does **not**
+  manufacture a positive edge on XAUUSD. Matches the standing D-016…D-020 conclusion.
+- **TF sweep 1m/2m/3m/5m/15m (added 2m+3m to `--timeframe`; 255 tests green):** every TF flips sign
+  across the 3 windows — no stable winner (0321→1m PF3.04, 0303→15m PF1.72, MT5→5m PF1.31, each
+  losing elsewhere). Overfit confirmed across the whole TF spectrum. maxDD held 5.8-16.1% on all 15
+  runs → risk layer is TF-agnostic; edge is not. (PROGRESS pm5 table.)
+- **Open:** changes staged/working-tree only — not committed (owner commits when ready). Next real
+  lever stays structural (different instrument / signal), not more param/TF tweaks.
+
 ## 2026-06-21 (pm 4) — Brain docs retired; spec rebased on Pine files (D-021)
 - Owner deleted `Brain.md` + `Brain_X.md`. Created **`STRATEGY.md`** (single source of truth,
   derived ONLY from the 2 Pine indicators: True Opens + AMD/PO3 sweep+CISD + Quarters + entry

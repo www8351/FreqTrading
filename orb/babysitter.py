@@ -37,6 +37,7 @@ class Action:
 class Babysitter:
     partial_frac: float = 0.7
     partial_at_r: float = 2.0
+    breakeven_at_r: float = 0.0      # >0: at this many R, never risk below entry
     default_d: float = 4.0           # fallback when a position has no SL
     _trades: dict = field(default_factory=dict)
 
@@ -59,6 +60,11 @@ class Babysitter:
                                       volume=p.volume * self.partial_frac))
 
             target = close - st.d if long_pos else close + st.d
+            # breakeven: once profit reaches breakeven_at_r * R, never let the
+            # stop sit worse than entry (tighten-only, so it can only protect).
+            if self.breakeven_at_r > 0 and profit >= self.breakeven_at_r * st.d:
+                target = (max(target, p.price_open) if long_pos
+                          else min(target, p.price_open))
             cur = p.sl or 0.0
             tighter = (cur == 0.0 or
                        (long_pos and target > cur) or

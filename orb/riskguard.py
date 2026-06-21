@@ -69,6 +69,44 @@ class DailyLossBreaker:
         return self._halted
 
 
+class ConsecutiveLossGuard:
+    """Session circuit breaker: stop taking new entries for the rest of the
+    session once ``max_consecutive`` losing trades print in a row.
+
+    ``max_consecutive <= 0`` disables it. The streak resets at every new session
+    (call :meth:`on_period` with the session/UTC-day key each bar) and after any
+    winning trade; a break-even trade (pnl == 0) leaves the streak unchanged.
+    Lives in the execution layer alongside :class:`DailyLossBreaker` so both the
+    backtest harness and the live cli share one implementation.
+    """
+
+    def __init__(self, max_consecutive: int) -> None:
+        self.max_consecutive = max_consecutive
+        self._period = None
+        self._streak = 0
+
+    def on_period(self, period) -> None:
+        """Feed the current session/day key; resets the streak on a new period."""
+        if period != self._period:
+            self._period = period
+            self._streak = 0
+
+    def record(self, pnl: float) -> None:
+        """Record a CLOSED trade's net pnl."""
+        if pnl < 0:
+            self._streak += 1
+        elif pnl > 0:
+            self._streak = 0
+
+    @property
+    def streak(self) -> int:
+        return self._streak
+
+    @property
+    def blocked(self) -> bool:
+        return self.max_consecutive > 0 and self._streak >= self.max_consecutive
+
+
 class SpikeCancel:
     """Cancel-unfilled-limits trigger: a 1m bar whose range is ``ratio`` times
     the average range of the previous ``lookback`` bars signals abnormal

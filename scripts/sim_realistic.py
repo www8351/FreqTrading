@@ -33,7 +33,7 @@ from orb.babysitter import LONG, SHORT, Babysitter
 from orb.engine import OrbEngine
 from orb.models import Candle, Direction, OrbConfig, SignalKind
 from orb.quarters import QuarterTracker, quarters
-from orb.riskguard import DailyLossBreaker, SpikeCancel
+from orb.riskguard import ConsecutiveLossGuard, DailyLossBreaker, SpikeCancel
 from orb.trueopen import TrueOpenTracker
 
 USD_PER_LOT_PER_DOLLAR = 100.0  # XAUUSD: 1 lot = 100 oz
@@ -41,10 +41,10 @@ ADDON_FRAC = 0.8
 LIMIT_TTL_SEC = 30 * 60
 SPIKE_MIN_AGE_SEC = 120
 
-# SVP timeframe aggregation: 1m input -> these bar sizes.
-_TF_MINUTES = {"1m": 1, "5m": 5, "15m": 15}
-# Bars before a profile is "ready" (~60-90 min wall-clock per timeframe).
-_TF_MIN_BARS = {"1m": 20, "5m": 12, "15m": 6}
+# SVP timeframe aggregation: 1m input -> these bar sizes (all divide 60 evenly).
+_TF_MINUTES = {"1m": 1, "2m": 2, "3m": 3, "5m": 5, "15m": 15}
+# Bars before a profile is "ready" (~40-90 min wall-clock per timeframe).
+_TF_MIN_BARS = {"1m": 20, "2m": 20, "3m": 16, "5m": 12, "15m": 6}
 
 
 # --------------------------------------------------------------------------- #
@@ -315,18 +315,27 @@ def run_svp(candles: list[Candle], risk_pct: float = 3.0, spread: float = 0.25,
     engine = SvpEngine(cfg)
     sim = Sim(qty=0.0, spread=spread, commission_rt=comm,
               value_per_move=value_per_move)
-    sitter = Babysitter(partial_frac=cfg.partial_frac, partial_at_r=cfg.partial_at_r)
+    sitter = Babysitter(partial_frac=cfg.partial_frac, partial_at_r=cfg.partial_at_r,
+                        breakeven_at_r=cfg.breakeven_at_r)
     spike = SpikeCancel(ratio=2.5)
     breaker = DailyLossBreaker(max_daily_loss_pct=max_daily_loss_pct)
+    # consecutive-loss circuit breaker (per UTC-day session); 0 = off
+    loss_guard = ConsecutiveLossGuard(cfg.max_consecutive_losses)
+    seen_closed = 0
 
     for c in candles:
         sig = engine.on_candle(c)
+        loss_guard.on_period(c.ts.date())           # reset streak on a new session
         bal = start_balance + sim.equity
         halted = breaker.update(c.ts.date(), bal)
         is_spike = spike.update(c.high, c.low)
         sim.on_bar(c, sitter, is_spike, halted)     # exits for existing positions
+        # feed any trades that just closed into the consecutive-loss streak
+        for t in sim.closed[seen_closed:]:
+            loss_guard.record(t["pnl"])
+        seen_closed = len(sim.closed)
         if (sig is not None and sig.kind is SignalKind.ENTRY and sig.stop
-                and not halted):
+                and not halted and not loss_guard.blocked):
             remaining = max(0.0, breaker.day_cap + breaker.day_pnl)
             lot = compute_lot(bal, cfg.risk_pct, sig.price, sig.stop,
                               value_per_move, vol_min, vol_step, vol_max,
@@ -382,6 +391,21 @@ def write_trades_json(records: list[dict], path: str) -> None:
     print(f"# wrote {len(records)} trades -> {path}", file=sys.stderr)
 
 
+def _parse_killzones(spec: str) -> tuple[tuple[int, int], ...]:
+    """Parse "07:00-10:00,12:30-15:00" (UTC) -> ((420,600),(750,900)) minutes."""
+    def mins(t: str) -> int:
+        h, m = t.strip().split(":")
+        return int(h) * 60 + int(m)
+    out: list[tuple[int, int]] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        lo, hi = part.split("-")
+        out.append((mins(lo), mins(hi)))
+    return tuple(out)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("csvs", nargs="*", default=["data/*.csv"])
@@ -404,6 +428,32 @@ def main() -> None:
                     default=10.0, help="halt for the rest of the UTC day after "
                     "losing this %% of the day's starting balance (svp; default 10)")
     ap.add_argument("--svp-enable-lvn", dest="svp_enable_lvn", action="store_true")
+    # --- filters & risk management (all OFF by default) --------------------
+    ap.add_argument("--svp-trend-filter", dest="svp_trend_filter",
+                    choices=("off", "open", "structure", "both", "either"),
+                    default="off",
+                    help="daily-bias trend filter: LONG only if bullish, SHORT only "
+                         "if bearish (open=open vs prior POC, structure=swing HH/HL, "
+                         "both=AND, either=OR; default off)")
+    ap.add_argument("--svp-atr-period", dest="svp_atr_period", type=int, default=14)
+    ap.add_argument("--svp-atr-stop-mult", dest="svp_atr_stop_mult", type=float,
+                    default=0.0, help="ATR stop = entry +/- mult*ATR (canonical "
+                                      "1.5-2.0); 0 keeps the structural shelf stop")
+    ap.add_argument("--svp-breakeven-r", dest="svp_breakeven_r", type=float,
+                    default=0.0,
+                    help="move stop to entry once profit reaches this many R (0=off)")
+    ap.add_argument("--svp-killzones", dest="svp_killzones", default="",
+                    help="allowed UTC windows e.g. 07:00-10:00,12:30-15:00 (empty=all)")
+    ap.add_argument("--svp-block-open-min", dest="svp_block_open_min", type=int,
+                    default=0, help="block the first N min after session open")
+    ap.add_argument("--svp-block-close-min", dest="svp_block_close_min", type=int,
+                    default=0, help="block the last N min before session close")
+    ap.add_argument("--svp-use-delta", dest="svp_use_delta", action="store_true",
+                    help="require volume-exhaustion confirm before fading (LIVE only; "
+                         "bypassed on zero-volume CSVs)")
+    ap.add_argument("--svp-max-consec-losses", dest="svp_max_consec_losses",
+                    type=int, default=0,
+                    help="stop new entries after N losing trades in a row (0=off)")
     ap.add_argument("--emit-trades", dest="emit_trades",
                     help="write entry trades as JSON for scripts/backtest_macro.py")
     args = ap.parse_args()
@@ -422,13 +472,28 @@ def main() -> None:
             candles = aggregate_candles(candles, tf_min)
             print(f"# aggregated to {args.timeframe}: bars={len(candles)}")
         print(f"# risk={args.svp_risk_pct}%/trade daily={args.max_daily_loss_pct}% "
-              f"start=${args.start_balance:.0f}\n")
+              f"start=${args.start_balance:.0f}")
+        print(f"# filters: trend={args.svp_trend_filter} "
+              f"atr_stop={args.svp_atr_stop_mult}xATR{args.svp_atr_period} "
+              f"be={args.svp_breakeven_r}R consec={args.svp_max_consec_losses} "
+              f"killzones='{args.svp_killzones or '-'}' "
+              f"blkopen={args.svp_block_open_min} blkclose={args.svp_block_close_min} "
+              f"delta={args.svp_use_delta}\n")
         sb = args.start_balance
         trades = run_svp(candles, risk_pct=args.svp_risk_pct, spread=args.spread,
                          comm=args.commission,
                          max_daily_loss_pct=args.max_daily_loss_pct,
                          start_balance=sb, timeframe=args.timeframe,
-                         enable_lvn=args.svp_enable_lvn)
+                         enable_lvn=args.svp_enable_lvn,
+                         trend_filter_mode=args.svp_trend_filter,
+                         atr_period=args.svp_atr_period,
+                         atr_stop_mult=args.svp_atr_stop_mult,
+                         breakeven_at_r=args.svp_breakeven_r,
+                         killzones=_parse_killzones(args.svp_killzones),
+                         block_open_min=args.svp_block_open_min,
+                         block_close_min=args.svp_block_close_min,
+                         use_delta_confirmation=args.svp_use_delta,
+                         max_consecutive_losses=args.svp_max_consec_losses)
         report("svp edge-rotation", trades, sb)
         print("\nby setup:")
         for r in sorted({t["reason"] for t in trades}):

@@ -61,3 +61,52 @@ def test_spike_ratio_validation():
     import pytest
     with pytest.raises(ValueError):
         SpikeCancel(ratio=1.0)
+
+
+from orb.riskguard import ConsecutiveLossGuard
+
+
+def test_consec_loss_blocks_after_n_losses():
+    g = ConsecutiveLossGuard(2)
+    g.on_period(D1)
+    g.record(-5.0)
+    assert not g.blocked          # 1 loss
+    g.record(-3.0)
+    assert g.blocked              # 2 in a row -> stop
+
+
+def test_consec_loss_win_resets_streak():
+    g = ConsecutiveLossGuard(2)
+    g.on_period(D1)
+    g.record(-5.0)
+    g.record(+10.0)               # win clears the streak
+    g.record(-2.0)
+    assert not g.blocked          # only 1 consecutive loss again
+
+
+def test_consec_loss_resets_on_new_session():
+    g = ConsecutiveLossGuard(2)
+    g.on_period(D1)
+    g.record(-5.0)
+    g.record(-5.0)
+    assert g.blocked
+    g.on_period(D2)               # new session -> fresh streak
+    assert not g.blocked
+
+
+def test_consec_loss_breakeven_does_not_count():
+    g = ConsecutiveLossGuard(2)
+    g.on_period(D1)
+    g.record(-5.0)
+    g.record(0.0)                 # break-even: streak unchanged, not reset
+    assert not g.blocked
+    g.record(-5.0)
+    assert g.blocked              # the two losses straddling a B/E still stop
+
+
+def test_consec_loss_disabled_when_zero():
+    g = ConsecutiveLossGuard(0)
+    g.on_period(D1)
+    for _ in range(10):
+        g.record(-5.0)
+    assert not g.blocked          # 0 = off

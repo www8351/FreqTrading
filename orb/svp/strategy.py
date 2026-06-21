@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from ..indicators import VolumeSMA
+from ..indicators import VolumeSMA, WilderATR
 from ..models import (
     Candle,
     Direction,
@@ -40,6 +40,7 @@ from ..session import SessionClock, Zone
 from .config import SvpConfig
 from .levels import PriorProfile, ProfileLevels, Shape
 from .profile import VolumeProfile
+from .structure import SwingStructure
 
 log = logging.getLogger("orb.svp.strategy")
 
@@ -57,6 +58,10 @@ class SvpEngine:
         ))
         self._developing = self._new_profile()
         self._vsma = VolumeSMA(config.absorb_lookback)
+        # risk/filter helpers (all inert unless enabled in config)
+        self._atr = WilderATR(config.atr_period)
+        self._swing = SwingStructure(config.swing_lookback)
+        self._session_open_px: float | None = None
         self._state = State.IDLE
         self._pos: PositionState | None = None
         self._prior: PriorProfile | None = None
@@ -113,6 +118,9 @@ class SvpEngine:
     def reset(self) -> None:
         self._developing = self._new_profile()
         self._vsma = VolumeSMA(self.config.absorb_lookback)
+        self._atr = WilderATR(self.config.atr_period)
+        self._swing = SwingStructure(self.config.swing_lookback)
+        self._session_open_px = None
         self._state = State.IDLE
         self._pos = None
         self._prior = None
@@ -190,6 +198,11 @@ class SvpEngine:
             pre_levels = self._developing.levels()
             self._developing.update(c)
             self._vsma.update(c.volume)
+            # feed risk/filter indicators (inert unless enabled in config)
+            self._atr.update(c.high, c.low, c.close)
+            self._swing.update(c.high, c.low)
+            if self._session_open_px is None:
+                self._session_open_px = c.open  # Condition A reference price
             self._prev_close = c.close
 
         # 4. dispatch
@@ -303,10 +316,22 @@ class SvpEngine:
     # Entry / exit
     # ------------------------------------------------------------------ #
     def _enter(self, c: Candle, direction: Direction, stop: float,
-               reason: str, lv: ProfileLevels) -> Signal:
+               reason: str, lv: ProfileLevels) -> Signal | None:
+        # --- FILTER GATE -----------------------------------------------------
+        # The edge-rotation TRIGGER (pierce VAH/VAL + close back inside) lives
+        # in _edge_rotation and is untouched. This single commit chokepoint
+        # (shared by every setup) decides whether a detected setup is allowed to
+        # become a position: trend-bias, killzone/blackout and delta filters.
+        # Returning None leaves the engine ARMED (no transition, no trade
+        # counted) so the next bar can still set up.
+        if not self._entry_allowed(c, direction):
+            return None
+        # --- RISK: optional ATR stop replaces the structural shelf stop ------
+        stop = self._risk_stop(c, direction, stop)
+        atr_at_entry = self._atr.value or 0.0
         self._pos = PositionState(
             direction=direction, entry_ts=c.ts, entry_price=c.close,
-            stop=stop, atr_at_entry=0.0, tp=None,
+            stop=stop, atr_at_entry=atr_at_entry, tp=None,
         )
         self._traded += 1
         event = "ENTRY_LONG" if direction is Direction.LONG else "ENTRY_SHORT"
@@ -331,6 +356,105 @@ class SvpEngine:
         return sig
 
     # ------------------------------------------------------------------ #
+    # Filters & risk (all inert unless enabled in config)
+    # ------------------------------------------------------------------ #
+    def _entry_allowed(self, c: Candle, direction: Direction) -> bool:
+        """Veto a detected setup (engine stays armed): killzone/blackout window,
+        trend-bias gate, then the volume/delta confirmation stub."""
+        if self._in_blackout(c):
+            return False
+        if not self._trend_ok(direction):
+            return False
+        if not self._delta_confirms(c):
+            return False
+        return True
+
+    def _in_blackout(self, c: Candle) -> bool:
+        """Time-of-day filter (UTC): open-volatility blackout, pre-close
+        blackout, and an optional set of allowed killzone windows."""
+        cfg = self.config
+        if not (cfg.block_open_min or cfg.block_close_min or cfg.killzones):
+            return False
+        open_dt = datetime.combine(c.ts.date(), cfg.session_open_utc,
+                                   tzinfo=c.ts.tzinfo)
+        if c.ts < open_dt:                       # bar belongs to prior day's open
+            open_dt -= timedelta(days=1)
+        mins_since = (c.ts - open_dt).total_seconds() / 60.0
+        mins_to_close = cfg.session_len_min - mins_since
+        if cfg.block_open_min and mins_since < cfg.block_open_min:
+            return True
+        if cfg.block_close_min and mins_to_close < cfg.block_close_min:
+            return True
+        if cfg.killzones:
+            mod = c.ts.hour * 60 + c.ts.minute
+            if not any(s <= mod < e for s, e in cfg.killzones):
+                return True
+        return False
+
+    def _bias_open(self) -> Direction | None:
+        """Condition A: this session's open vs the PRIOR session POC — bullish
+        when the open prints above it, bearish below, neutral if no prior."""
+        if self._prior is None or self._session_open_px is None:
+            return None
+        if self._session_open_px > self._prior.poc:
+            return Direction.LONG
+        if self._session_open_px < self._prior.poc:
+            return Direction.SHORT
+        return None
+
+    def _trend_ok(self, direction: Direction) -> bool:
+        """Allow LONG only on a confirmed bullish bias, SHORT only on bearish.
+        Combines Condition A (open vs prior POC) and Condition B (swing HH/HL vs
+        LH/LL) per ``trend_filter_mode``. A neutral/unknown bias blocks the trade
+        (act only on a CONFIRMED bias)."""
+        mode = self.config.trend_filter_mode
+        if mode == "off":
+            return True
+        a = self._bias_open()        # Condition A
+        b = self._swing.bias         # Condition B (market structure)
+        if mode == "open":
+            return a is direction
+        if mode == "structure":
+            return b is direction
+        if mode == "both":
+            return a is direction and b is direction
+        return a is direction or b is direction   # "either"
+
+    def _delta_confirms(self, c: Candle) -> bool:
+        """Volume/delta exhaustion confirmation — LIVE-only stub. Tick volume is
+        UNDIRECTED, so genuine delta needs a live order-flow feed; on zero-volume
+        backtest CSVs this BYPASSES (never blocks). When enabled with real
+        volume, require the fade bar to print on BELOW-average volume (declining
+        participation at the extreme = exhaustion)."""
+        cfg = self.config
+        if not cfg.use_delta_confirmation:
+            return True
+        if c.volume <= 0:            # no volume -> cannot evaluate -> bypass
+            return True
+        avg = self._vsma.value
+        if avg is None or avg <= 0:
+            return True
+        return c.volume < avg
+
+    def _risk_stop(self, c: Candle, direction: Direction,
+                   structural: float) -> float:
+        """Optionally replace the structural shelf stop with a dynamic ATR stop
+        at ``atr_stop_mult`` x ATR from entry (canonical 1.5-2.0). Falls back to
+        the structural stop until the ATR is ready, and (default) never sits
+        TIGHTER than the structural shelf — a tight stop is swept by the tagging
+        wick itself."""
+        cfg = self.config
+        if cfg.atr_stop_mult <= 0 or not self._atr.ready:
+            return structural
+        dist = cfg.atr_stop_mult * self._atr.value
+        entry = c.close
+        atr_stop = entry + dist if direction is Direction.SHORT else entry - dist
+        if cfg.atr_stop_floor_structural:
+            return (max(atr_stop, structural) if direction is Direction.SHORT
+                    else min(atr_stop, structural))
+        return atr_stop
+
+    # ------------------------------------------------------------------ #
     # Session / helpers
     # ------------------------------------------------------------------ #
     def _roll_session(self, new_id: str, ts: datetime) -> None:
@@ -347,6 +471,9 @@ class SvpEngine:
                              f"session={new_id}")
         self._developing = self._new_profile()
         self._vsma = VolumeSMA(self.config.absorb_lookback)
+        self._atr = WilderATR(self.config.atr_period)
+        self._swing = SwingStructure(self.config.swing_lookback)
+        self._session_open_px = None
         self._state = State.IDLE
         self._pos = None
         self._traded = 0

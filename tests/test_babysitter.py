@@ -51,3 +51,29 @@ def test_closed_tickets_forgotten():
     assert p.ticket in b._trades
     b.on_bar([], close=4072.0)
     assert p.ticket not in b._trades
+
+
+def test_breakeven_moves_stop_to_entry_short():
+    # breakeven at 0.5R: at +0.5R the d-trail (close+d) is still ABOVE entry, so
+    # the breakeven floor (entry) is the tighter/protective stop and must win.
+    b = Babysitter(breakeven_at_r=0.5)
+    p = pos()                                    # short @4080, sl 4084 -> d=4
+    a = b.on_bar([p], close=4078.0)              # +2 == 0.5R; trail=4082 > entry
+    sl = next(x for x in a if x.kind == "update_sl").sl
+    assert abs(sl - 4080.0) < 1e-9               # clamped down to entry (breakeven)
+
+
+def test_breakeven_moves_stop_to_entry_long():
+    b = Babysitter(breakeven_at_r=0.5)
+    p = pos(type=LONG, price_open=4080.0, sl=4076.0)  # d=4
+    a = b.on_bar([p], close=4082.0)              # +2 == 0.5R; trail=4078 < entry
+    sl = next(x for x in a if x.kind == "update_sl").sl
+    assert abs(sl - 4080.0) < 1e-9               # clamped up to entry (breakeven)
+
+
+def test_breakeven_off_by_default_keeps_pure_trail():
+    b = Babysitter()                             # breakeven_at_r=0 -> off
+    p = pos()                                    # short, d=4
+    a = b.on_bar([p], close=4078.0)              # +2; pure trail = close + d
+    sl = next(x for x in a if x.kind == "update_sl").sl
+    assert abs(sl - 4082.0) < 1e-9               # unchanged behavior
