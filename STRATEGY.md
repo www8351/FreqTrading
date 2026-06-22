@@ -19,15 +19,15 @@
 
 | Pine file | Role | Python port |
 |-----------|------|-------------|
-| `Ture_Open_Price.pine` | True Open levels + directional bias + premium/discount zones | `orb/trueopen.py` [WIRED] |
-| `AMD_pro_v1.pine` | PO3/AMD engine: phase, ERL liquidity sweep, CISD reclaim, C1–C4 fractal, EQ 50% law | `orb/quarters.py` (time mapping) [WIRED]; sweep model [RESEARCH] |
+| `pine/True_Open_Price.pine` | True Open levels + directional bias + premium/discount zones | `orb/trueopen.py` [WIRED] |
+| `pine/AMD_pro_v1.pine` | PO3/AMD engine: phase, ERL liquidity sweep, CISD reclaim, C1–C4 fractal, EQ 50% law | `orb/quarters.py` (time mapping) [WIRED]; sweep model [RESEARCH] |
 
 Both are **indicators** (drawing tools, no trade logic). This spec is what turns
 them into a tradeable model.
 
 ## 2. Methodology (from the pines)
 
-### 2.1 Time — Quarters / AMD  (`AMD_pro_v1.pine`, `orb/quarters.py`)
+### 2.1 Time — Quarters / AMD  (`pine/AMD_pro_v1.pine`, `orb/quarters.py`)
 Every time unit splits into four quarters with an algorithmic role:
 - **Q1 Accumulation** — sideways, builds liquidity pools.
 - **Q2 Manipulation** — false move that hits stops (the sweep).
@@ -37,7 +37,7 @@ Every time unit splits into four quarters with an algorithmic role:
 AMD phase = same idea live: Accumulation → Manipulation (ERL sweep) → Distribution
 (expansion > 50% body). C1–C4 fractal + equilibrium-50% law refine the sequence.
 
-### 2.2 Price — True Opens  (`Ture_Open_Price.pine`, `orb/trueopen.py`)
+### 2.2 Price — True Opens  (`pine/True_Open_Price.pine`, `orb/trueopen.py`)
 Open captured at key NY times: **TDO** 00:00, **session** 01:30/07:30/13:30,
 **TWO** Mon 18:00, **TMO** 2nd-Sunday 18:00, **90m cycles** 03:23/09:23/15:23.
 Derived reads: **bias** = close vs NY True Open; **zone** = premium / discount /
@@ -51,7 +51,7 @@ dead-zone (close vs TDO + session + week opens).
 5. **Target** — fixed Reward:Risk (tested 1:2 … 1:10).
 6. **Entry fill** — limit at the level (pays spread once) or market at close.
 
-Artifacts: `True_Open_Sweep_Strategy.pine` (TradingView), `scripts/backtest_sweep.py`
+Artifacts: `pine/True_Open_Sweep_Strategy.pine` (TradingView), `scripts/backtest_sweep.py`
 (cost-true Python port reusing `sim_realistic` loaders + `orb/svp/sizing.compute_lot`).
 
 ## 4. Risk / RRR

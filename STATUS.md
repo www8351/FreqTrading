@@ -1,6 +1,60 @@
 # STATUS
 
-_Last updated: 2026-06-21_
+_Last updated: 2026-06-22_
+
+## 2026-06-22 — Task 1 DONE: `run()` parameterized (behavior-preserving)
+- `scripts/sim_realistic.py`: added `_orb_cfg()` helper; `run()` now accepts `roc_min`, `tp_rrr`,
+  `tp_close_frac`, `partial_frac`, `partial_at_r`, `spike_ratio` as optional kwargs (all default to
+  prior hardcoded values — behavior unchanged). Trade dict keys unchanged.
+- `tests/test_sim_run_params.py`: 3 new tests (config mapping, regression, roc_min gate). All pass.
+- Full suite: **258 passed**, 0 failures. Committed `a7e674e`.
+- **Note:** commit also included pre-staged reorg from D-023 (was already in git index before task).
+- **Next Task:** T2 — `sweep_orb.py` pure helpers + score/tf_sweep/param_grid/oos_gate + CLI.
+
+## 2026-06-22 — Plan approved: US100 productionize + gold ORB grid (spec written)
+- Spec: `docs/superpowers/specs/2026-06-22-us100-deploy-gold-orb-grid-design.md` (design APPROVED).
+- **Key finding:** US100 already live (bots.ps1) at the validated config (ORB 1m, deadzone+q2q3,
+  qty 0.40, PF 1.85-2.17) — "deploy" ~already done at 1m. "5m best" was a false premise (no 5m
+  US100 test ever; 5m was GOLD SVP = ruin).
+- **Track A (US100):** A1 real-spread check → A2 ORB TF sweep 1m-15m + sign test → A3 re-backtest
+  @ real spread (**GATE: no live change if sign flips / PF<~1.3**) → A4 deploy (1m=no-op, keep qty
+  0.40; higher TF deferred, needs live aggregation).
+- **Track C (gold):** ORB param grid @ real $0.10-0.12 with **HARD OOS gate** (split + 3 windows;
+  in-sample winners discarded). Survivor→DECISION; none→D-020 reaffirmed.
+- **New code (backtest-side, none yet written):** `scripts/check_spread.py`, ORB TF aggregation,
+  `scripts/sweep_orb.py`.
+- **Plan written:** `docs/superpowers/plans/2026-06-22-us100-deploy-gold-orb-grid.md` (9 tasks, TDD).
+  T1 parameterize run() · T2/2.5 sweep_orb harness · T3 check_spread · T4-7 run A1/A2/A3/A4 ·
+  T8 gold grid+OOS gate. **Next:** owner picks execution mode (subagent-driven vs inline).
+  **Zero live change until GATE A3 passes.**
+
+## 2026-06-22 — Workspace cleanup / reorg (D-023)
+- Pine files consolidated into `pine/` (typo `Ture`→`True`, `Sav FX`→`Sav_FX`); stale dup
+  `orb/Ture_Open_Price.pine` deleted; `PLAN_MACRO_LAYER.md` → `docs/history/`. Living docs
+  (README/STRATEGY) repointed. Scratch scripts (`_sweep_silver`, `_sweep_stops`, `_run_us100_window`)
+  removed. Runtime junk purged (disabled-bot logs, `watchdog.log`, `gold.csv`, `.pytest_cache/`,
+  `log_backups/`, ~970 KB). Kept `data/`, `.obsidian/`, live logs.
+- **Bot "duplication" was a Store-python alias artifact, not real** (1 logical bot = stub PID + child
+  PID). `bots.ps1 restart` → exactly 1 XAUUSD + 1 US100 live, both feeding (mt5_connected, tz=10800).
+- Reorg **staged, not committed** — owner to review + commit. Zero code-behavior change.
+- **Next:** owner review/commit. (Still open from pm7) independent-source + real-spread check on US100.
+
+## 2026-06-21 (pm 7) — US100 2nd window + split-sample: sign STABLE (passes test gold failed)
+- Fetched `data/us100_1m_20260310_20260619.csv` (MT5 100k-bar cap). New runner
+  `scripts/_run_us100_window.py` (US100 ORB spec, full + first/second-half splits).
+- **LIVE (dz+q2q3) PF positive on every split:** FULL **2.17** · 1st-half **2.06** · 2nd-half OOS
+  **1.95**. vs pm6 window 1.85 → range **1.85-2.17** across 4 splits, win% 36-40%, maxDD ≤$203.
+- **Passes the sign-stability test XAUUSD FAILED (D-020):** gold flipped sign across windows
+  (overfit); US100 holds PF>1.6 everywhere incl held-out 2nd half. **First instrument to pass.**
+- **NOT proven yet / next:** (1) windows overlap heavy (all MT5, same ~3mo) — need INDEPENDENT
+  source (2nd broker/TwelveData) like the gold test had. (2) only ~3mo, no regime variety.
+  (3) **spread=1.0pt is ASSUMED** — verify real US100 ECN spread (gold's killer); if >1.0pt edge
+  shrinks. Next lever = independent data + real-spread check, NOT more same-source windows.
+
+## 2026-06-21 (pm 6) — US100 ORB backtest (owner request)
+- `scripts/backtest_symbols.py`, window 2026-03-03..06-12, US100 (spread 1.0pt, comm 0, qty 0.80):
+  baseline PF **1.87** (+$5,147, maxDD $199) · deadzone PF **1.93** (+$3,239) · LIVE dz+q2q3 PF
+  **1.85** (+$1,954, maxDD $111). **US100 = best of 4 symbols** (XAUUSD 1.51, US500 1.50, XAGUSD 1.04).
 
 ## 2026-06-21 (pm 5) — Institutional filter/risk layer added to SVP ("spike momentum setup") (D-022)
 - Owner asked to add trend filters + risk management to the SVP edge-rotation strategy (fix the

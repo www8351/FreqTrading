@@ -1,5 +1,31 @@
 # DECISIONS
 
+## D-023 — Workspace cleanup: Pine consolidated to `pine/`, plan archived, runtime junk purged
+- **Date:** 2026-06-22
+- **Context:** Owner asked to clean up jank/old files. Root held 8 scattered live logs, a stray
+  `gold.csv` export, a duplicate + misspelled Pine file, throwaway scratch scripts, and a finished
+  plan doc living as a root file. Owner also flagged an apparent 2× live-bot duplication.
+- **Decided / done:**
+  - **Pine consolidated** into new `pine/` (git mv, history kept): typo `Ture_Open_Price.pine` →
+    `pine/True_Open_Price.pine`; `orb/Sav FX.pine` (space) → `pine/Sav_FX.pine`; `AMD_pro_v1.pine`
+    + `True_Open_Sweep_Strategy.pine` moved in. Stale older copy `orb/Ture_Open_Price.pine` deleted
+    (root version newer/canonical). Living-doc refs updated (README, STRATEGY, `backtest_sweep.py`);
+    historical dated entries left intact per the D-021 convention.
+  - **`PLAN_MACRO_LAYER.md` archived** → `docs/history/` (M0–M6 shipped per D-013; plan executed,
+    kept for reference). README link repointed.
+  - **Scratch scripts removed:** `scripts/_sweep_silver.py`, `scripts/_sweep_stops.py` (zero refs),
+    `scripts/_run_us100_window.py` (header "Throwaway", was untracked).
+  - **Runtime junk purged (gitignored/untracked, owner-confirmed delete):** disabled-bot logs
+    (US500/XAGUSD), `watchdog.log`, stray `gold.csv`, `.pytest_cache/`, `log_backups/` (~970 KB).
+  - **Bot "duplication" was NOT real** — the Microsoft Store `python.exe` alias stub re-execs the
+    real `pythoncore-3.14` as a child, so 1 logical bot = 2 processes (confirmed via PID/PPID tree).
+    Ran `bots.ps1 restart` (native primitive) → exactly 1 XAUUSD + 1 US100, both `mt5_connected`,
+    `broker_tz_offset_sec=10800`, logs reset. No keeper `watch` loop running.
+  - **Kept:** `data/` (45 MB backtest inputs), `.obsidian/`, the 4 live log/signal files (held open).
+- **Status:** final. Reorg **staged, not committed** (owner to review/commit). Zero code-behavior
+  change; ORB live bots untouched and healthy. Rejected: deleting `data/` (regenerable but useful);
+  rewriting historical doc refs (violates lifecycle append-only timeline).
+
 ## D-022 — Institutional filter/risk layer on SVP; caps drawdown, does NOT create edge
 - **Date:** 2026-06-21
 - **Context:** Owner asked to add trend filtering + risk management to the SVP edge-rotation

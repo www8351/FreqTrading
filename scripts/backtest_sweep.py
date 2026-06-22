@@ -1,5 +1,5 @@
 """Honest backtest of the True-Open Sweep-Reversal model (Python port of
-True_Open_Sweep_Strategy.pine).
+pine/True_Open_Sweep_Strategy.pine).
 
 Setup (same logic as the Pine strategy):
     bias      price vs NY True Open (orb/trueopen.py)

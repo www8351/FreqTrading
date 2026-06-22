@@ -56,7 +56,7 @@ re-deriving context.
   (economic calendar, FRED, GDELT, sentiment, market proxies) and writes a single
   `macro_state.json`. Each `orb live` reads it via `orb/macroguard.py` as an entry
   veto / qty-scale / risk-off layer. **Off by default** (`--macro-mode off`);
-  fail-safe (macro layer down ⇒ trade as today). See D-013 + `PLAN_MACRO_LAYER.md`.
+  fail-safe (macro layer down ⇒ trade as today). See D-013 + `docs/history/PLAN_MACRO_LAYER.md`.
 - M0–M3 shipped: contract + pure guard; M1 = ForexFactory calendar collector
   (FairEconomy JSON feed, no key) + high-impact blackout windows (NFP/CPI/FOMC,
   30/30) + `python -m macro run` daemon; M2 = surprise scorer (`macro/scorer.py` +
@@ -103,7 +103,8 @@ re-deriving context.
 ## Useful links / references
 - `STRATEGY.md` — pine-derived strategy spec (methodology, entry model, honest verdict).
   Replaces the deleted `Brain.md` / `Brain_X.md` (2026-06-21).
-- Pine sources: `AMD_pro_v1.pine`, `Ture_Open_Price.pine` (+ `orb/Sav FX.pine`).
+- Pine sources (all under `pine/`): `AMD_pro_v1.pine`, `True_Open_Price.pine`,
+  `True_Open_Sweep_Strategy.pine`, `Sav_FX.pine`.
 
 ## Tone notes
 Direct, concise, technical. No filler.
