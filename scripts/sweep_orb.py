@@ -52,6 +52,29 @@ SPECS: dict[str, dict] = {
                    qty=0.06, daily=110.0),
 }
 
+# Real measured broker spread (price units), 2026-06-22 (D-025):
+#   US100.ecn median 0.60pt (was assumed 1.0); XAUUSD ~0.10. Used as the per-symbol
+#   default; override with --spread.
+DEFAULT_SPREAD: dict[str, float] = {"US100": 0.6, "XAUUSD": 0.10}
+
+# Per-symbol param-grid axes. Stop bands MUST match the instrument's scale: gold
+# moves in ~2-6 price units, US100 in ~15-40 points. (Sharing gold bands on US100
+# instant-stops every trade -> PF 0.48 garbage, the D-025 bug.)
+GRID_AXES: dict[str, dict] = {
+    "US100": {
+        "roc_min": [0.10, 0.15, 0.20, 0.25],
+        "stop_min": [10.0, 15.0, 20.0], "stop_max": [20.0, 30.0, 40.0],
+        "tp_rrr": [1.5, 2.0, 3.0],
+        "partial_frac": [0.5, 0.7],
+    },
+    "XAUUSD": {
+        "roc_min": [0.10, 0.15, 0.20, 0.25],
+        "stop_min": [2.0, 2.6, 3.0], "stop_max": [4.0, 5.2, 6.0],
+        "tp_rrr": [1.5, 2.0, 3.0],
+        "partial_frac": [0.5, 0.7],
+    },
+}
+
 _TFS_DEFAULT = ["1m", "2m", "3m", "5m", "15m"]
 
 
@@ -120,13 +143,12 @@ def main() -> None:
     ap.add_argument("--symbol", default="US100", choices=tuple(SPECS))
     ap.add_argument("--csv", default="", help="data CSV (default: per-symbol)")
     ap.add_argument("--spread", type=float, default=None,
-                    help="price-unit spread (default 1.0 US100 / 0.10 gold)")
+                    help="price-unit spread (default: real measured 0.6 US100 / 0.10 gold)")
     ap.add_argument("--pf-min", type=float, default=1.0)
     args = ap.parse_args()
 
     spec = SPECS[args.symbol]
-    spread = args.spread if args.spread is not None else (
-        1.0 if args.symbol == "US100" else 0.10)
+    spread = args.spread if args.spread is not None else DEFAULT_SPREAD[args.symbol]
     default_csv = ("data/us100_1m_20260310_20260619.csv" if args.symbol == "US100"
                    else "data/xauusd_1m_20260303_20260612.csv")
     csv_path = args.csv or default_csv
@@ -144,12 +166,7 @@ def main() -> None:
                 print(_fmt(k, s[k]))
     elif args.mode == "grid":
         candles = load_csv([csv_path])
-        axes = {
-            "roc_min": [0.10, 0.15, 0.20, 0.25],
-            "stop_min": [2.0, 2.6, 3.0], "stop_max": [4.0, 5.2, 6.0],
-            "tp_rrr": [1.5, 2.0, 3.0],
-            "partial_frac": [0.5, 0.7],
-        }
+        axes = GRID_AXES[args.symbol]
         print(f"# grid {args.symbol} {csv_path} spread={spread} "
               f"({len(grid_iter(axes))} combos)")
         ranked = param_grid(candles, spec, axes, spread)

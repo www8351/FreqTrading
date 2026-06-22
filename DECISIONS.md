@@ -1,5 +1,38 @@
 # DECISIONS
 
+## D-025 — PF≥2.2 target: HIT on the full window at the real measured US100 spread (0.6pt); not yet robust per-split
+- **Date:** 2026-06-22
+- **Context:** Owner demanded PF ≥ 2.2 ("no way less"). Ran `scripts/sweep_orb.py` across the
+  trade universe; US100 ORB 1m (validated live config: deadzone+q2q3, stops 15/30) is the only
+  candidate with any positive edge (gold + sweep = no edge, D-016…D-020).
+- **Findings:**
+  - **Full-window, spread→PF:** 0.0→2.30, 0.3→2.28, 0.5→2.25, 0.7→2.22, 1.0→2.17. PF≥2.2 holds iff
+    the REAL US100 spread ≤ ~0.75pt.
+  - **REAL spread measured** (bots paused, `check_spread.py US100.ecn --bars 5000`): median
+    **0.60pt**, mean 0.57, p90 0.90, min 0.20. The assumed 1.0pt was conservative.
+  - **⇒ At the real 0.6pt: full PF = 2.23 (1st 2.13 / 2nd-OOS 2.01, maxDD $192).** PF≥2.2 is met on
+    the full window honestly — the gain comes from a lower MEASURED cost, not parameter fitting.
+  - **Robust per-split ≥2.2 NOT yet met.** A US100-correct grid (270 combos, gated on full+1st+2nd+
+    2nd window) @ 1.0pt found 0 combos with PF≥2.2 on every split (best robust min-PF 1.93; best
+    in-sample full 2.11 → 1.87 OOS = overfit). At 0.6pt the splits lift to 2.01-2.23 but each split
+    individually still isn't ≥2.2.
+- **Decided:** Accept the **full-window PF 2.23 at the real 0.6pt spread** as a genuine pass of the
+  ≥2.2 target. Do **not** chase a per-split ≥2.2 by curve-fitting params (the D-020 trap — best-full
+  configs fail the independent window). Use the measured 0.6pt as the US100 cost basis going forward.
+- **Rejected:** (a) reporting the in-sample peak (2.17/2.30) as the live-true number; (b) the
+  gold-axis `grid` output (PF 0.48 — meaningless: 2-6pt stops on a 15-30pt instrument); (c) any
+  best-full config (2.11) selected by in-sample PF — it collapses to 1.87 on the held-out window.
+- **Status:** Target HIT (full window). Revisitable: per-split robustness would need a new
+  instrument/signal, not more tuning. Live ORB pays the real broker spread regardless.
+- **Follow-ups DONE (2026-06-22, 289 tests green):** (1) US100 backtest default spread 1.0→**0.6**
+  (`sweep_orb.py` `DEFAULT_SPREAD`; `backtest_symbols.py` US100 `spread=0.6`; `check_spread.py` print).
+  (2) Grid bug fixed — per-symbol `GRID_AXES` (US100 stops 10/15/20×20/30/40, gold unchanged); the
+  grid now ranks the validated live config first at PF 2.23 (so 2.2 is NOT a tuned override).
+- **Window-sensitivity caveat (added on re-baseline):** the 2.23 is the **0310-0619** window. The
+  overlapping **0303-0612** window gives US100 dz+q2q3 PF **1.92** at the same 0.6 spread → the ≥2.2
+  pass is window-specific (both windows profitable, 1.9-2.2). Strengthens the "full-window, not
+  robust-everywhere" framing above.
+
 ## D-023 — Workspace cleanup: Pine consolidated to `pine/`, plan archived, runtime junk purged
 - **Date:** 2026-06-22
 - **Context:** Owner asked to clean up jank/old files. Root held 8 scattered live logs, a stray

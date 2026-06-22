@@ -76,7 +76,7 @@ def main() -> int:
               f"max={s['max']:.4f} mean={s['mean']:.4f}")
         print(f"live ask-bid now: "
               f"{('%.4f' % live) if live is not None else 'n/a (closed)'}")
-        print(f"backtest ASSUMED spread = 1.0 (US100) / 0.10 (gold) -> compare median/p90")
+        print(f"backtest spread = 0.6 (US100, real measured) / 0.10 (gold) -> compare median/p90")
     finally:
         mt5.shutdown()
     return 0

@@ -1,5 +1,64 @@
 # PROGRESS
 
+## 2026-06-22 — Re-baseline at real US100 spread 0.6 + grid bug fix
+- Set the US100 backtest default spread **1.0 → 0.6** (real measured, D-025) in `scripts/sweep_orb.py`
+  (`DEFAULT_SPREAD` dict) and `scripts/backtest_symbols.py` (US100 `spread=0.6`); updated the
+  `check_spread.py` print line. Gold unchanged (0.10).
+- **Fixed the grid bug:** `sweep_orb.py grid` axes were hardcoded gold stop bands (2-6pt) → on US100
+  PF 0.48 garbage. Added a per-symbol `GRID_AXES` dict (US100 = stop 10/15/20 × 20/30/40; gold =
+  unchanged). Grid now ranks the validated live config at the top.
+- **Re-baseline (0310-0619 window @ 0.6):** US100 1m full PF **2.23** (1st 2.13 / 2nd 2.01); grid
+  top = roc 0.15 / stop 15/30 / tp_rrr 2 (= the live config) at **2.23** — the validated config is
+  the grid winner, not a curve-fit override.
+- **Window caveat (honest):** multi-symbol baseline (`backtest_symbols.py`, **0303-0612** window @
+  0.6) gives US100 dz+q2q3 PF **1.92** — the 0303 window does NOT reach 2.2 even at 0.6 spread; the
+  2.23 is specific to the 0310-0619 window. Both windows profitable (1.9-2.2), but the ≥2.2 pass is
+  window-sensitive, not universal. Full multi-symbol @ new spreads: XAU 1.61 / US100 1.90 (baseline)
+  / US500 1.50 / XAG 1.08.
+- Tests: test_sweep_orb + test_check_spread green (9); full suite re-run.
+
+## 2026-06-22 — PF≥2.2 stage: HIT (full PF 2.23) once the real US100 spread (0.6pt) was measured
+- Owner: run the PF stage, must be ≥ 2.2. Ran `scripts/sweep_orb.py` on the validated US100 ORB
+  config (1m, deadzone+q2q3, stops 15/30, $0 comm).
+- **What worked:** `tf` mode reproduces the known live result — US100 1m full PF **2.17**
+  (1st 2.06 / 2nd-OOS 1.95, maxDD $203). 2m 1.87, 3m 1.75; 5m/15m = 0 trades (1m-tuned gates).
+- **Spread sensitivity (1m full, in-sample):** spread 0.0→2.30, 0.3→2.28, 0.5→2.25, 0.7→2.22,
+  1.0→2.17. ⇒ full-window PF≥2.2 holds iff real spread ≤ ~0.75pt.
+- **What did NOT work:** `sweep_orb.py grid` as shipped — its axes hardcode gold stop bands
+  (2-6pt), instant-stopping every US100 trade (win 13% / PF 0.48, all 216 combos losing). Wrote a
+  throwaway US100-correct grid (270 combos × 4 splits, deleted after): **0 combos clear PF≥2.2 on
+  all of full+1st+2nd+W2.** Best robust min-PF = 1.93; best in-sample full 2.11 collapses to 1.87
+  on the 2nd window = textbook overfit (same trap as D-020).
+- **Real spread MEASURED** (owner had me pause bots): `check_spread.py US100.ecn --bars 5000` →
+  median **0.60pt**, mean 0.57, p90 0.90, min 0.20 (live weekend 0.80). Assumed 1.0pt was
+  conservative. Gotchas: symbol = `US100.ecn` (not `US100`); 100k-bar copy_rates → "Invalid params"
+  → use --bars 5000. `mt5.initialize` worked even with bots up; the earlier failure was the bad
+  symbol name, not a busy terminal.
+- **PF≥2.2 HIT honestly.** US100 1m @ real 0.6pt: full PF **2.23** / 1st 2.13 / 2nd-OOS 2.01,
+  maxDD $192. Headline target met on the full window from a lower MEASURED cost (not a fit). Robust
+  per-split ≥2.2 still short (held-out 2.01-2.13) but all splits profitable.
+- **Bots paused + restored** with `bots.ps1 off`/`on`. Scheduled-Task enable/disable hit "Access is
+  denied" (non-admin) but STOP_TRADING + kill + Start-Task did the job; 0 open positions the whole
+  time; both bots back ON + feeding. Logged as D-025. No code/live change.
+
+## 2026-06-22 — SVP structural TP + 2R-skip gate + breakeven-only exit + stops-level validation
+- Owner asked for a dynamic, market-derived TP (orders were going out with no logical TP). Found the
+  real gap is SVP-specific: `SvpEngine` always emitted `tp=None`; live ORB already has RR-TP via
+  `tp_rrr`. Clarified design via AskUserQuestion (×2):
+  - TP = **setup-aware structural** (fade/absorb→POC, LVN-break→next HVN), **not** a fabricated RR
+    point; **skip the trade** if R:R to that target < 2.0 (owner: "never put a TP in the air").
+  - Exit: **cancel** the 70% partial + continuous pip-trail; instead **move SL to breakeven at 2R**
+    (30-pip stop → BE at +60), then ride the server TP. Scope = **SvpEngine only** (live ORB
+    untouched); absorption → POC; rollout "all now" (no real live change — SVP isn't on a bot).
+- TDD: RED→GREEN per unit. New `orb/svp/targets.py` (`structural_target`, `rr_ok`); `SvpConfig`
+  gains `structural_tp`/`tp_min_rr`; `SvpEngine._enter` computes TP + applies the gate; `Babysitter`
+  gains `partial`/`trail` flags (breakeven-only mode); `Mt5Broker._clamp_stops` enforces
+  `SYMBOL_TRADE_STOPS_LEVEL*point + spread` and tick-snap on entry paths; CLI flags
+  `--svp-structural-tp` / `--svp-tp-min-rr`.
+- All flag-gated / default-off → existing SVP + broker tests stay green. +18 new tests; full suite
+  **285 passed** (was 267). Verified the CLI wiring end-to-end (config→server_tp→babysitter).
+- Did NOT change live ORB strategy. Not committed (owner review pending).
+
 ## 2026-06-22 — Task 1: `run()` parameterized (behavior-preserving)
 - TDD: RED (`ImportError: _orb_cfg`) → GREEN (3/3 tests pass in 2.14s) → full suite 258 passed.
 - Added `_orb_cfg()` helper; `run()` gains `roc_min=0.15`, `tp_rrr=2.0`, `tp_close_frac=0.7`,
