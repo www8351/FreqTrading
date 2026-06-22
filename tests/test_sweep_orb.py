@@ -40,3 +40,27 @@ def test_sign_stable_all_positive():
     assert sign_stable(good) is True
     assert sign_stable(bad) is False
     assert sign_stable(good, pf_min=1.3) is False   # 1.1 < 1.3
+
+
+# ---------------------------------------------------------------------------
+# Wiring smoke tests (Task 3): exercise real signal generation on a data slice
+# ---------------------------------------------------------------------------
+from sweep_orb import SPECS, score, tf_sweep  # noqa: E402
+from sim_realistic import load_csv            # noqa: E402
+
+US100 = "data/us100_1m_20260303_20260612.csv"
+
+
+def test_score_shape_on_real_slice():
+    candles = load_csv([US100])[:12000]
+    s = score(candles, SPECS["US100"], params={}, spread=1.0)
+    assert set(s) == {"full", "first", "second"}
+    for k in s:
+        assert "pf" in s[k] and "pnl" in s[k] and "n" in s[k]
+
+
+def test_tf_sweep_returns_each_tf():
+    candles = load_csv([US100])[:12000]
+    out = tf_sweep(candles, SPECS["US100"], params={}, tfs=["1m", "5m"], spread=1.0)
+    assert set(out) == {"1m", "5m"}
+    assert "full" in out["1m"] and "full" in out["5m"]
