@@ -1,6 +1,16 @@
 # STATUS
 
-_Last updated: 2026-06-22_
+_Last updated: 2026-06-23_
+
+## 2026-06-23 — LIVE: US100 qty 0.40 → 0.60 (owner sizing for $483 balance)
+- Owner: run the bot on the validated PF-2.23 setup, qty 0.60. The US100 bot was ALREADY live on
+  that exact config (entry limit, stop 15/30, roc 0.15, tp-rrr 2, spike 2.5, deadzone+q2q3); only
+  the size changed. PF is qty-independent → still 2.23, just larger $ per trade.
+- Edited `scripts/bots.ps1` US100 `--qty 0.40 → 0.60`; `bots.ps1 restart` (market closed, 0 open
+  positions). Verified: US100.ecn live with `--qty 0.60`, both bots alive + feeding.
+- Sizing: worst-case ≈ stop_max 30 × 0.60 × $1 = ~$18/trade (3.7% of $483); maxDD ~$144 (backtest
+  $192 was qty 0.80); $60 daily breaker ≈ 3 max losers. XAUUSD bot unchanged (qty 0.04).
+- Trades at next market open (`market_live=False` now). Live ORB unchanged otherwise.
 
 ## 2026-06-22 — PF≥2.2 stage: HIT on full window (PF 2.23) at the REAL measured US100 spread (0.6pt)
 - Owner demand: PF ≥ 2.2, "no way less". Ran the sweep harness on the validated US100 ORB
@@ -34,31 +44,11 @@ _Last updated: 2026-06-22_
   window gives US100 dz+q2q3 PF **1.92** at the same 0.6 spread. Both profitable (1.9-2.2) but the
   ≥2.2 pass is **window-sensitive**, not universal. Live ORB unaffected (pays the real broker spread).
 
-## 2026-06-22 — DONE: SVP setup-aware structural TP + 2R-skip gate + breakeven-only exit + stops-level validation (D-024)
-- **What:** SVP gets a real, logically-derived TP (was always `tp=None`). Behind new flag
-  `--svp-structural-tp` (OFF by default → SVP behavior byte-identical).
-  - **Target (setup-aware):** fade/absorption → **POC**; LVN-break → **next HVN** in trade
-    direction. `orb/svp/targets.py` (`structural_target`, `rr_ok`), wired in `SvpEngine._enter`.
-  - **2R hard gate:** if R:R to the structural target < `--svp-tp-min-rr` (default 2.0) the setup
-    is **skipped** (engine stays armed), never retargeted to a fabricated level.
-  - **Exit redesign (babysitter):** new `partial`/`trail` flags. Structural-TP mode = **no 70%
-    partial, no pip-trail**; SL jumps once to **breakeven at 2R**; server TP takes profit.
-  - **Server TP** now reaches the order for SVP (`server_tp=True` when structural_tp on).
-  - **Stops-level validation:** `Mt5Broker._clamp_stops` pushes SL/TP outside
-    `SYMBOL_TRADE_STOPS_LEVEL*point + spread` and snaps to tick (prevents 10016 INVALID_STOPS);
-    applied on market + limit entry paths. No-op when symbol reports no stops_level (test fakes).
-- **Tests:** TDD throughout. +18 tests (targets 11, svp 3, babysitter 2, broker 2). Full suite
-  **285 passed**, 0 failures.
-- **Live impact:** NONE today — SVP is not on a running bot (live = ORB on bots.ps1); flag is off.
-  The stops-level clamp is a pure safety net active on all entry paths.
-- **Files:** `orb/svp/targets.py` (new), `orb/svp/strategy.py`, `orb/svp/config.py`,
-  `orb/babysitter.py`, `orb/broker/mt5.py`, `orb/cli.py`.
-- **Backtest DONE (the gate):** gold full window @ spread $0.12 / comm $7. Baseline (70% partial +
-  trail) PF **0.79** (−$229); structural-TP (POC, 2R gate, BE-only) PF **0.39** (−$724) = **WORSE**.
-  Structural TP does NOT create the edge SVP lacks (reaffirms D-020/D-022). Added Sim server-TP exit
-  modeling (`Position.tp` + TP-hit, SL-priority) to test honestly; +4 tests → **289 passed**.
-- **Do NOT enable `structural_tp` live.** Feature correct + safe (default-off) but strategy fails.
-- **Open:** owner decision — commit the (off-by-default, well-tested) infra + finding, or shelve.
+## 2026-06-22 — SVP structural-TP experiment REVERTED (no edge, owner discarded)
+- Built setup-aware structural TP (POC/HVN) + 2R skip-gate + breakeven-only exit + stops-level
+  validation for SVP (flag-gated, default-off). Gold backtest: PF **0.39** vs **0.79** baseline =
+  WORSE. Confirms D-020/D-022 (SVP has no edge; a smarter TP can't create one). Owner reverted all
+  code/tests via `git checkout`; this entry is the only trace. Live ORB never touched.
 
 ## 2026-06-22 — Task 1 DONE: `run()` parameterized (behavior-preserving)
 - `scripts/sim_realistic.py`: added `_orb_cfg()` helper; `run()` now accepts `roc_min`, `tp_rrr`,

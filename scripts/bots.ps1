@@ -34,7 +34,7 @@ $ENABLED = @(
             "--qty 0.04 --stop-min 2.6 --stop-max 5.2 --max-daily-loss 110 $common" },
   @{ sym = 'US100.ecn'; out = 'live_us100_signals.log'; err = 'live_us100_engine.log';
      args = "-m orb live --source orb.feeds.mt5feed:us100_live --symbol US100.ecn " +
-            "--qty 0.40 --stop-min 15 --stop-max 30 --max-daily-loss 60 --quarter-filter q2q3 $common" }
+            "--qty 0.60 --stop-min 15 --stop-max 30 --max-daily-loss 60 --quarter-filter q2q3 $common" }
 )
 # DISABLED (kept for easy re-enable - do NOT launch unless you add them back to $ENABLED):
 #  US500.ecn : --source orb.feeds.mt5feed:us500_live  --symbol US500.ecn  --qty 1.5  --stop-min 4    --stop-max 8    --max-daily-loss 60 --quarter-filter q2q3 $common

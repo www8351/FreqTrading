@@ -1,5 +1,11 @@
 # PROGRESS
 
+## 2026-06-23 — LIVE: US100 qty 0.40 → 0.60
+- Owner sized US100 up to 0.60 for the $483 balance on the validated PF-2.23 setup. Bot was already
+  running that config; only `--qty` changed in `scripts/bots.ps1`. `bots.ps1 restart` (market closed,
+  0 positions). Verified US100.ecn live at `--qty 0.60`, both bots alive+feeding. Worst-case risk
+  ~$18/trade (3.7%), maxDD ~$144, $60 daily breaker. XAUUSD unchanged.
+
 ## 2026-06-22 — Re-baseline at real US100 spread 0.6 + grid bug fix
 - Set the US100 backtest default spread **1.0 → 0.6** (real measured, D-025) in `scripts/sweep_orb.py`
   (`DEFAULT_SPREAD` dict) and `scripts/backtest_symbols.py` (US100 `spread=0.6`); updated the
@@ -41,23 +47,11 @@
   denied" (non-admin) but STOP_TRADING + kill + Start-Task did the job; 0 open positions the whole
   time; both bots back ON + feeding. Logged as D-025. No code/live change.
 
-## 2026-06-22 — SVP structural TP + 2R-skip gate + breakeven-only exit + stops-level validation
-- Owner asked for a dynamic, market-derived TP (orders were going out with no logical TP). Found the
-  real gap is SVP-specific: `SvpEngine` always emitted `tp=None`; live ORB already has RR-TP via
-  `tp_rrr`. Clarified design via AskUserQuestion (×2):
-  - TP = **setup-aware structural** (fade/absorb→POC, LVN-break→next HVN), **not** a fabricated RR
-    point; **skip the trade** if R:R to that target < 2.0 (owner: "never put a TP in the air").
-  - Exit: **cancel** the 70% partial + continuous pip-trail; instead **move SL to breakeven at 2R**
-    (30-pip stop → BE at +60), then ride the server TP. Scope = **SvpEngine only** (live ORB
-    untouched); absorption → POC; rollout "all now" (no real live change — SVP isn't on a bot).
-- TDD: RED→GREEN per unit. New `orb/svp/targets.py` (`structural_target`, `rr_ok`); `SvpConfig`
-  gains `structural_tp`/`tp_min_rr`; `SvpEngine._enter` computes TP + applies the gate; `Babysitter`
-  gains `partial`/`trail` flags (breakeven-only mode); `Mt5Broker._clamp_stops` enforces
-  `SYMBOL_TRADE_STOPS_LEVEL*point + spread` and tick-snap on entry paths; CLI flags
-  `--svp-structural-tp` / `--svp-tp-min-rr`.
-- All flag-gated / default-off → existing SVP + broker tests stay green. +18 new tests; full suite
-  **285 passed** (was 267). Verified the CLI wiring end-to-end (config→server_tp→babysitter).
-- Did NOT change live ORB strategy. Not committed (owner review pending).
+## 2026-06-22 — SVP structural-TP experiment (built, backtested, REVERTED)
+- Built setup-aware structural TP (fade/absorb→POC, LVN→next HVN) + 2R skip-gate + breakeven-only
+  exit + broker stops-level clamp for SVP, all flag-gated default-off, TDD (+22 tests). Gold
+  backtest = PF **0.39** vs **0.79** baseline (WORSE) → no edge (reaffirms D-020/D-022). Owner
+  reverted all code/tests via `git checkout`; kept only this note. Live ORB never touched.
 
 ## 2026-06-22 — Task 1: `run()` parameterized (behavior-preserving)
 - TDD: RED (`ImportError: _orb_cfg`) → GREEN (3/3 tests pass in 2.14s) → full suite 258 passed.
