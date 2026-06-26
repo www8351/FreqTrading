@@ -2,6 +2,15 @@
 
 _Last updated: 2026-06-23_
 
+## 2026-06-23 — LIVE: US100-ONLY (24h owner watch); XAUUSD parked
+- Owner: "next 24h run only US100, let's see how it runs." Removed XAUUSD.ecn from `$ENABLED` in
+  `scripts/bots.ps1` (moved to DISABLED comment block; no-edge anyway per D-020). US100 config
+  untouched (qty 0.60, stop 15/30, roc 0.15, tp-rrr 2, spike 2.5, deadzone+q2q3, max-daily-loss 60).
+- `bots.ps1 restart` killed 4 stale/dup procs, relaunched **1** (US100 only). Verified:
+  US100.ecn alive=True feeding=True; keeper now respawns US100 ONLY. 0 open positions, market
+  closed (market_live=False) → trades at next open.
+- Re-enable XAUUSD: uncomment its line back into `$ENABLED`, `bots.ps1 restart`.
+
 ## 2026-06-23 — LIVE: US100 qty 0.40 → 0.60 (owner sizing for $483 balance)
 - Owner: run the bot on the validated PF-2.23 setup, qty 0.60. The US100 bot was ALREADY live on
   that exact config (entry limit, stop 15/30, roc 0.15, tp-rrr 2, spike 2.5, deadzone+q2q3); only
