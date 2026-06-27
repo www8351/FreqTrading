@@ -1,5 +1,174 @@
 # PROGRESS
 
+<<<<<<< Updated upstream
+=======
+## 2026-06-27 — Public packaging + latency optimizations (no behaviour change)
+- **Goal:** package the repo as a public GitHub showcase (AI/DevOps positioning) + shave execution
+  latency, without altering trading logic.
+- **Wrote:** new public `README.md` (Architecture / Low-Latency Optimizations / Setup / Usage / CI);
+  `requirements.txt` (only `MetaTrader5`, Windows env-marked) + `requirements-dev.txt`;
+  `.github/workflows/ci.yml` (py3.11/3.12: flake8 critical-blocking + full-advisory, black --check
+  advisory, pytest); `.flake8`; `[tool.black]` in `pyproject.toml`.
+- **Latency opt 1 — adaptive polling** (`orb/feeds/mt5feed.py`): replaced the fixed `poll_sec` sleep
+  with a boundary-timed sleep (`min_poll` default 0.1s) + exponential backoff on no-rates. Cuts
+  worst-case bar-detection latency from ~2s to ~`min_poll`. Injectable `now_fn`/`mt5` kept.
+- **Latency opt 2 — broker-state cache** (`orb/brokerstate.py`, wired in `orb/cli.py`): a background
+  asyncio task refreshes balance/positions via `run_in_executor`, so `on_bar` reads a cached snapshot
+  instead of making 2 blocking MT5 IPC calls on the candle path. Writes stay synchronous (no order race).
+- **Latency opt 3 — parallel position routing:** documented as a design note in the README (not applied;
+  mutates live orders, needs a terminal to validate).
+- **What worked:** `pytest -q` → 273 passing (added 4 brokerstate + 2 adaptive-feed tests). flake8
+  critical subset = 0 across the repo; new code is flake8- and black-clean. `python -m orb --help`
+  and imports OK.
+- **Snag (env):** the working tree was reset from `main` to `feat/us100-verify-gold-orb-grid`
+  mid-task, discarding the first pass of these changes; all files were re-applied on the new branch.
+- **Decision logged:** D-026 (strictly-accurate public framing — no ML/profit claims).
+
+## 2026-06-23 — LIVE: US100-ONLY 24h watch (XAUUSD parked)
+- Owner wants next 24h on US100 alone. Removed XAUUSD.ecn from `$ENABLED` in `scripts/bots.ps1`
+  (kept as DISABLED comment for one-line re-enable; no-edge per D-020). US100 config unchanged.
+- `bots.ps1 restart`: killed 4 stale/dup procs, relaunched 1. `status` → US100.ecn alive+feeding,
+  keeper respawns US100 only. 0 positions, market closed → trades at next open. WORKED.
+
+## 2026-06-23 — LIVE: US100 qty 0.40 → 0.60
+- Owner sized US100 up to 0.60 for the $483 balance on the validated PF-2.23 setup. Bot was already
+  running that config; only `--qty` changed in `scripts/bots.ps1`. `bots.ps1 restart` (market closed,
+  0 positions). Verified US100.ecn live at `--qty 0.60`, both bots alive+feeding. Worst-case risk
+  ~$18/trade (3.7%), maxDD ~$144, $60 daily breaker. XAUUSD unchanged.
+
+## 2026-06-22 — Re-baseline at real US100 spread 0.6 + grid bug fix
+- Set the US100 backtest default spread **1.0 → 0.6** (real measured, D-025) in `scripts/sweep_orb.py`
+  (`DEFAULT_SPREAD` dict) and `scripts/backtest_symbols.py` (US100 `spread=0.6`); updated the
+  `check_spread.py` print line. Gold unchanged (0.10).
+- **Fixed the grid bug:** `sweep_orb.py grid` axes were hardcoded gold stop bands (2-6pt) → on US100
+  PF 0.48 garbage. Added a per-symbol `GRID_AXES` dict (US100 = stop 10/15/20 × 20/30/40; gold =
+  unchanged). Grid now ranks the validated live config at the top.
+- **Re-baseline (0310-0619 window @ 0.6):** US100 1m full PF **2.23** (1st 2.13 / 2nd 2.01); grid
+  top = roc 0.15 / stop 15/30 / tp_rrr 2 (= the live config) at **2.23** — the validated config is
+  the grid winner, not a curve-fit override.
+- **Window caveat (honest):** multi-symbol baseline (`backtest_symbols.py`, **0303-0612** window @
+  0.6) gives US100 dz+q2q3 PF **1.92** — the 0303 window does NOT reach 2.2 even at 0.6 spread; the
+  2.23 is specific to the 0310-0619 window. Both windows profitable (1.9-2.2), but the ≥2.2 pass is
+  window-sensitive, not universal. Full multi-symbol @ new spreads: XAU 1.61 / US100 1.90 (baseline)
+  / US500 1.50 / XAG 1.08.
+- Tests: test_sweep_orb + test_check_spread green (9); full suite re-run.
+
+## 2026-06-22 — PF≥2.2 stage: HIT (full PF 2.23) once the real US100 spread (0.6pt) was measured
+- Owner: run the PF stage, must be ≥ 2.2. Ran `scripts/sweep_orb.py` on the validated US100 ORB
+  config (1m, deadzone+q2q3, stops 15/30, $0 comm).
+- **What worked:** `tf` mode reproduces the known live result — US100 1m full PF **2.17**
+  (1st 2.06 / 2nd-OOS 1.95, maxDD $203). 2m 1.87, 3m 1.75; 5m/15m = 0 trades (1m-tuned gates).
+- **Spread sensitivity (1m full, in-sample):** spread 0.0→2.30, 0.3→2.28, 0.5→2.25, 0.7→2.22,
+  1.0→2.17. ⇒ full-window PF≥2.2 holds iff real spread ≤ ~0.75pt.
+- **What did NOT work:** `sweep_orb.py grid` as shipped — its axes hardcode gold stop bands
+  (2-6pt), instant-stopping every US100 trade (win 13% / PF 0.48, all 216 combos losing). Wrote a
+  throwaway US100-correct grid (270 combos × 4 splits, deleted after): **0 combos clear PF≥2.2 on
+  all of full+1st+2nd+W2.** Best robust min-PF = 1.93; best in-sample full 2.11 collapses to 1.87
+  on the 2nd window = textbook overfit (same trap as D-020).
+- **Real spread MEASURED** (owner had me pause bots): `check_spread.py US100.ecn --bars 5000` →
+  median **0.60pt**, mean 0.57, p90 0.90, min 0.20 (live weekend 0.80). Assumed 1.0pt was
+  conservative. Gotchas: symbol = `US100.ecn` (not `US100`); 100k-bar copy_rates → "Invalid params"
+  → use --bars 5000. `mt5.initialize` worked even with bots up; the earlier failure was the bad
+  symbol name, not a busy terminal.
+- **PF≥2.2 HIT honestly.** US100 1m @ real 0.6pt: full PF **2.23** / 1st 2.13 / 2nd-OOS 2.01,
+  maxDD $192. Headline target met on the full window from a lower MEASURED cost (not a fit). Robust
+  per-split ≥2.2 still short (held-out 2.01-2.13) but all splits profitable.
+- **Bots paused + restored** with `bots.ps1 off`/`on`. Scheduled-Task enable/disable hit "Access is
+  denied" (non-admin) but STOP_TRADING + kill + Start-Task did the job; 0 open positions the whole
+  time; both bots back ON + feeding. Logged as D-025. No code/live change.
+
+## 2026-06-22 — SVP structural-TP experiment (built, backtested, REVERTED)
+- Built setup-aware structural TP (fade/absorb→POC, LVN→next HVN) + 2R skip-gate + breakeven-only
+  exit + broker stops-level clamp for SVP, all flag-gated default-off, TDD (+22 tests). Gold
+  backtest = PF **0.39** vs **0.79** baseline (WORSE) → no edge (reaffirms D-020/D-022). Owner
+  reverted all code/tests via `git checkout`; kept only this note. Live ORB never touched.
+
+## 2026-06-22 — Task 1: `run()` parameterized (behavior-preserving)
+- TDD: RED (`ImportError: _orb_cfg`) → GREEN (3/3 tests pass in 2.14s) → full suite 258 passed.
+- Added `_orb_cfg()` helper; `run()` gains `roc_min=0.15`, `tp_rrr=2.0`, `tp_close_frac=0.7`,
+  `partial_frac=0.7`, `partial_at_r=2.0`, `spike_ratio=2.5` kwargs (all default to prior hardcoded
+  values; behavior-preserving regression test confirms identical output). Committed `a7e674e`.
+- Snag: pre-staged reorg changes (D-023 pine moves + script deletes) were in the git index before
+  the task; they were swept into the commit alongside the two target files. Code changes correct.
+
+## 2026-06-22 — Plan: US100 productionize + gold ORB grid (spec written, design approved)
+- Owner: "deploy US100, 5m best, re-test gold diff params." Brainstormed; corrected 2 premises:
+  (1) **no 5m US100 result exists** — the sign-stable win was **ORB@1m**; 5m results were GOLD SVP
+  (RUIN). (2) **US100 already runs live** (bots.ps1: ORB 1m, qty 0.40, stop 15-30, roc 0.15, RR2,
+  deadzone+q2q3) = the validated LIVE config (PF 1.85-2.17) — so "deploy" ~already done at 1m.
+- Decisions (AskUserQuestion): deploy = **verify→live, skip demo**; sweep = **ORB across TFs** (not
+  SVP); gold = **ORB param grid** w/ mandatory OOS gate; US100 live size = **keep qty 0.40**.
+- **Spec written + approved:** `docs/superpowers/specs/2026-06-22-us100-deploy-gold-orb-grid-design.md`.
+  - Track A (US100): A1 real-spread check (`check_spread.py`, per-bar copy_rates spread col) → A2
+    ORB TF sweep 1m/2m/3m/5m/15m + split-sample sign test (confound: 1m-tuned roc/stops flagged) →
+    A3 re-backtest @ real spread, **GATE: no live change if sign flips / PF<~1.3** → A4 deploy (1m
+    expected = no-op; higher TF needs live aggregation, deferred).
+  - Track C (gold): ORB grid roc_min×stop×RR×partial @ real $0.10-0.12; **HARD OOS gate** — every
+    winner re-tested across split + 3 gold windows (TD0321/TD0303/MT5); in-sample-only discarded.
+    Survivor→new DECISION; none→D-020 reaffirmed, gold closed.
+  - New code (backtest-side): `scripts/check_spread.py`, ORB TF aggregation (reuse aggregate_candles),
+    `scripts/sweep_orb.py` (TF sweep + grid + sign-test, both symbols).
+- **Plan written** (after spec approval): `docs/superpowers/plans/2026-06-22-us100-deploy-gold-orb-grid.md`
+  — 9 TDD tasks: T1 parameterize `run()` (behavior-preserving, regression-tested); T2/T2.5
+  `sweep_orb.py` (pure helpers + score/tf_sweep/param_grid/oos_gate + CLI); T3 `check_spread.py`
+  (MT5 per-bar spread distribution, pure stats core); T4 run A1 spread; T5 run A2 TF sweep; T6 run
+  A3 gate; T7 A4 deploy decision (expected no-op, keep 0.40); T8 gold grid + OOS gate → DECISIONS.
+- **Open:** awaiting owner execution-mode choice (subagent-driven vs inline). Zero live change until
+  GATE A3 passes.
+
+## 2026-06-22 — Workspace cleanup / reorg (D-023)
+- Owner: "clean up base code, jank/old files." Investigated read-only (3 Explore agents) → mapped
+  duplicates, scratch, runtime junk, stale docs, and the live-bot process tree.
+- **Reorg (git mv/rm, history preserved):** new `pine/` holds all 4 Pine files — `Ture_Open_Price.pine`
+  → `pine/True_Open_Price.pine` (typo fix), `orb/Sav FX.pine` → `pine/Sav_FX.pine` (space removed),
+  `AMD_pro_v1.pine` + `True_Open_Sweep_Strategy.pine` moved in. Deleted stale older
+  `orb/Ture_Open_Price.pine`. Archived `PLAN_MACRO_LAYER.md` → `docs/history/`. Updated refs in
+  README/STRATEGY/`scripts/backtest_sweep.py`.
+- **Deleted:** scratch `_sweep_silver.py` / `_sweep_stops.py` / `_run_us100_window.py`; junk logs
+  (US500/XAGUSD/watchdog), `gold.csv`, `.pytest_cache/`, `log_backups/` (~970 KB freed). Kept `data/`,
+  `.obsidian/`, live logs.
+- **Bot duplication = false alarm:** PID/PPID tree shows Store `python.exe` alias stub + real
+  `pythoncore-3.14` child = 1 logical bot shown as 2 procs. `bots.ps1 restart` cleanly relaunched the
+  2 (XAUUSD + US100); both reconnected (mt5_connected, broker_tz_offset_sec=10800), no IPC errors.
+- **Worked:** native `bots.ps1 restart` as the dedup/log-reset primitive. **Snag:** blind junk-delete
+  was blocked by the safety classifier (unnamed data files) → got explicit owner confirmation, then
+  deleted. Reorg left **staged** for the owner to commit.
+
+## 2026-06-21 (pm 7) — US100 2nd window + split-sample: sign STABLE (passes the test gold failed)
+- Owner: fetch another US100 window + re-run (OOS check). `fetch_mt5_history.py --symbols US100.ecn
+  --bars 200000` → MT5 capped at 100k bars → `data/us100_1m_20260310_20260619.csv` (real tick-vol,
+  2026-03-10 .. 06-19). Mostly overlaps the pm6 window (head 03-03..03-10 dropped, tail 06-12..06-19
+  new) — so ALSO split into first/second halves for a cleaner in/out test.
+- New reusable runner `scripts/_run_us100_window.py` (mirrors backtest_symbols US100 spec: value 1.0,
+  stop 15-30, spread 1.0, comm 0, qty 0.80, daily 60; mutes engine spike spam) — runs full + halves.
+- **Results — LIVE (dz+q2q3) PF positive on EVERY split:**
+  - FULL 03-10..06-19: base PF 1.85 / dz 1.98 / **LIVE 2.17** (+$2,494, maxDD $203, n=408)
+  - 1st half 03-10..04-30: base 2.04 / dz 2.21 / **LIVE 2.06** (+$1,335)
+  - 2nd half OOS 04-30..06-19: base 1.67 / dz 1.82 / **LIVE 1.95** (+$926, maxDD $90, n=179)
+  - vs pm6 window (03-03..06-12) LIVE 1.85 → LIVE PF range across 4 splits = **1.85-2.17**, win% 36-40%.
+- **This is the test XAUUSD FAILED (D-020).** Gold flipped sign across windows (PF 0.26↔1.72 = overfit).
+  US100 ORB holds PF>1.6 on every split incl the held-out 2nd half. Mild decay 2nd half (base
+  2.04→1.67) but no sign flip. First instrument to pass sign-stability.
+- **Still NOT proven (open holes):** (1) windows overlap heavy — all MT5, same ~3mo, same instrument;
+  not independent SOURCES like gold's TwelveData-vs-MT5 test. (2) only ~3 months, no regime variety.
+  (3) **spread=1.0pt ASSUMED** — gold's killer was real-vs-assumed spread; verify real US100 ECN
+  spread (if >1.0pt edge shrinks). Next lever = independent data source + real-spread check, NOT
+  more same-source windows.
+
+## 2026-06-21 (pm 6) — US100 ORB backtest (owner request)
+- Ran `python scripts/backtest_symbols.py` (live ORB config, limit-mode pipeline). Window
+  2026-03-03 .. 2026-06-12, US100 spec: value=1.0, stop 15-30 pt, spread=1.0 pt, comm=0, qty=0.80.
+- **US100 results:** baseline n=1118 win 38.3% PF **1.87** pnl +$5,147 maxDD $199 · deadzone n=657
+  win 39.6% PF **1.93** pnl +$3,239 maxDD $133 · deadzone+q2q3 (LIVE) n=425 win 38.8% PF **1.85**
+  pnl +$1,954 maxDD $111.
+- **US100 is the strongest of the 4 symbols** this window: XAUUSD PF 1.51, US500 1.50, XAGUSD 1.04.
+  Win% range across symbols: baseline 30.3-38.3%, live 28.8-38.8% (US100 top in both).
+- **Caveat:** single in-sample window, no walk-forward. The "no replicable edge" verdict (D-020)
+  was established for XAUUSD/SVP by flipping sign across data windows; US100 ORB has NOT had the
+  same multi-window stress test. One window of PF 1.87 is not a proven edge. Next: pull a 2nd/3rd
+  US100 window via `fetch_mt5_history.py` and re-run to check sign stability before any trust.
+
+>>>>>>> Stashed changes
 ## 2026-06-21 (pm 5) — Filter + risk-management layer on SVP edge-rotation (D-022)
 - Owner request ("spike momentum setup"): add trend filters + institutional risk management to the
   SVP edge-rotation strategy, fix the 332% drawdown, stop longs losing into the bearish gold trend,

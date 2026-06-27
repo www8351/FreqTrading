@@ -1,5 +1,89 @@
 # DECISIONS
 
+<<<<<<< Updated upstream
+=======
+## D-026 — Public packaging is strictly accurate: low-latency execution engine, no ML/profit claims
+- **Date:** 2026-06-27
+- **Context:** Owner is positioning their GitHub profile as an AI & DevOps Architect (HA MLOps,
+  low-latency execution engines) and asked for a professional README, requirements, CI, and latency
+  optimizations. The repo, however, has **no machine learning** (stdlib + lazy `MetaTrader5` only —
+  no numpy/pandas/sklearn) and its own notes (D-016…D-020, D-025) record that most strategies do not
+  beat realistic costs (US100 ORB is the only positive-edge path, and only on the full window).
+- **Decided:** Frame the public docs around the *real* strength — a clean, deterministic, low-latency,
+  well-tested execution engine + DevOps/CI automation. **No MLOps claims, no profitability claims.**
+  Honest strategy verdicts remain in `DECISIONS.md` / `STRATEGY.md`; the README links to them.
+- **Rejected:** an aggressive "profitable MLOps HFT" framing — it would require fabricating ML and
+  performance that don't exist in the source; reputationally risky for a profile meant to signal rigor.
+- **Also decided (latency work):** implement the two *read-side* optimizations (adaptive polling in
+  `mt5feed.py`; `BrokerStateCache` background refresh of balance/positions off the candle path) with
+  tests; keep all *write-side* order ops synchronous. The ThreadPoolExecutor parallel-order idea is
+  documented but NOT applied — it mutates live orders and can't be validated without a terminal.
+- **CI choice:** flake8 split into a blocking critical subset (`E9,F63,F7,F82`) + an advisory full
+  run, and black `--check` advisory — the existing tree isn't black-formatted, and a repo-wide
+  reformat was deliberately deferred to avoid a giant style diff burying this change.
+- **Status:** Done. 273 tests green; no live trading semantics changed. Revisitable: drop the CI
+  `continue-on-error` flags once a one-off `black .` + flake8 cleanup lands.
+
+## D-025 — PF≥2.2 target: HIT on the full window at the real measured US100 spread (0.6pt); not yet robust per-split
+- **Date:** 2026-06-22
+- **Context:** Owner demanded PF ≥ 2.2 ("no way less"). Ran `scripts/sweep_orb.py` across the
+  trade universe; US100 ORB 1m (validated live config: deadzone+q2q3, stops 15/30) is the only
+  candidate with any positive edge (gold + sweep = no edge, D-016…D-020).
+- **Findings:**
+  - **Full-window, spread→PF:** 0.0→2.30, 0.3→2.28, 0.5→2.25, 0.7→2.22, 1.0→2.17. PF≥2.2 holds iff
+    the REAL US100 spread ≤ ~0.75pt.
+  - **REAL spread measured** (bots paused, `check_spread.py US100.ecn --bars 5000`): median
+    **0.60pt**, mean 0.57, p90 0.90, min 0.20. The assumed 1.0pt was conservative.
+  - **⇒ At the real 0.6pt: full PF = 2.23 (1st 2.13 / 2nd-OOS 2.01, maxDD $192).** PF≥2.2 is met on
+    the full window honestly — the gain comes from a lower MEASURED cost, not parameter fitting.
+  - **Robust per-split ≥2.2 NOT yet met.** A US100-correct grid (270 combos, gated on full+1st+2nd+
+    2nd window) @ 1.0pt found 0 combos with PF≥2.2 on every split (best robust min-PF 1.93; best
+    in-sample full 2.11 → 1.87 OOS = overfit). At 0.6pt the splits lift to 2.01-2.23 but each split
+    individually still isn't ≥2.2.
+- **Decided:** Accept the **full-window PF 2.23 at the real 0.6pt spread** as a genuine pass of the
+  ≥2.2 target. Do **not** chase a per-split ≥2.2 by curve-fitting params (the D-020 trap — best-full
+  configs fail the independent window). Use the measured 0.6pt as the US100 cost basis going forward.
+- **Rejected:** (a) reporting the in-sample peak (2.17/2.30) as the live-true number; (b) the
+  gold-axis `grid` output (PF 0.48 — meaningless: 2-6pt stops on a 15-30pt instrument); (c) any
+  best-full config (2.11) selected by in-sample PF — it collapses to 1.87 on the held-out window.
+- **Status:** Target HIT (full window). Revisitable: per-split robustness would need a new
+  instrument/signal, not more tuning. Live ORB pays the real broker spread regardless.
+- **Follow-ups DONE (2026-06-22, 289 tests green):** (1) US100 backtest default spread 1.0→**0.6**
+  (`sweep_orb.py` `DEFAULT_SPREAD`; `backtest_symbols.py` US100 `spread=0.6`; `check_spread.py` print).
+  (2) Grid bug fixed — per-symbol `GRID_AXES` (US100 stops 10/15/20×20/30/40, gold unchanged); the
+  grid now ranks the validated live config first at PF 2.23 (so 2.2 is NOT a tuned override).
+- **Window-sensitivity caveat (added on re-baseline):** the 2.23 is the **0310-0619** window. The
+  overlapping **0303-0612** window gives US100 dz+q2q3 PF **1.92** at the same 0.6 spread → the ≥2.2
+  pass is window-specific (both windows profitable, 1.9-2.2). Strengthens the "full-window, not
+  robust-everywhere" framing above.
+
+## D-023 — Workspace cleanup: Pine consolidated to `pine/`, plan archived, runtime junk purged
+- **Date:** 2026-06-22
+- **Context:** Owner asked to clean up jank/old files. Root held 8 scattered live logs, a stray
+  `gold.csv` export, a duplicate + misspelled Pine file, throwaway scratch scripts, and a finished
+  plan doc living as a root file. Owner also flagged an apparent 2× live-bot duplication.
+- **Decided / done:**
+  - **Pine consolidated** into new `pine/` (git mv, history kept): typo `Ture_Open_Price.pine` →
+    `pine/True_Open_Price.pine`; `orb/Sav FX.pine` (space) → `pine/Sav_FX.pine`; `AMD_pro_v1.pine`
+    + `True_Open_Sweep_Strategy.pine` moved in. Stale older copy `orb/Ture_Open_Price.pine` deleted
+    (root version newer/canonical). Living-doc refs updated (README, STRATEGY, `backtest_sweep.py`);
+    historical dated entries left intact per the D-021 convention.
+  - **`PLAN_MACRO_LAYER.md` archived** → `docs/history/` (M0–M6 shipped per D-013; plan executed,
+    kept for reference). README link repointed.
+  - **Scratch scripts removed:** `scripts/_sweep_silver.py`, `scripts/_sweep_stops.py` (zero refs),
+    `scripts/_run_us100_window.py` (header "Throwaway", was untracked).
+  - **Runtime junk purged (gitignored/untracked, owner-confirmed delete):** disabled-bot logs
+    (US500/XAGUSD), `watchdog.log`, stray `gold.csv`, `.pytest_cache/`, `log_backups/` (~970 KB).
+  - **Bot "duplication" was NOT real** — the Microsoft Store `python.exe` alias stub re-execs the
+    real `pythoncore-3.14` as a child, so 1 logical bot = 2 processes (confirmed via PID/PPID tree).
+    Ran `bots.ps1 restart` (native primitive) → exactly 1 XAUUSD + 1 US100, both `mt5_connected`,
+    `broker_tz_offset_sec=10800`, logs reset. No keeper `watch` loop running.
+  - **Kept:** `data/` (45 MB backtest inputs), `.obsidian/`, the 4 live log/signal files (held open).
+- **Status:** final. Reorg **staged, not committed** (owner to review/commit). Zero code-behavior
+  change; ORB live bots untouched and healthy. Rejected: deleting `data/` (regenerable but useful);
+  rewriting historical doc refs (violates lifecycle append-only timeline).
+
+>>>>>>> Stashed changes
 ## D-022 — Institutional filter/risk layer on SVP; caps drawdown, does NOT create edge
 - **Date:** 2026-06-21
 - **Context:** Owner asked to add trend filtering + risk management to the SVP edge-rotation
