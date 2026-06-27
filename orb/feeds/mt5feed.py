@@ -20,6 +20,7 @@ from ..models import Candle, OrbError
 log = logging.getLogger("orb.feeds.mt5")
 
 TIMEFRAME_M1 = 1  # mt5.TIMEFRAME_M1
+BAR_SECONDS = 60  # M1 bar period; used to time the poll to the bar boundary
 RECONNECT_AFTER = 3  # consecutive no-rate polls before re-initializing the IPC link
 
 
@@ -49,6 +50,7 @@ async def stream_candles(
     tz_offset_sec: int | str = "auto",
     mt5=None,
     now_fn=None,
+    min_poll: float = 0.1,
 ):
     """Async generator of closed M1 Candles from the local MT5 terminal.
 
@@ -59,6 +61,14 @@ async def stream_candles(
     offset-locking is deferred until a genuinely-forming bar appears — otherwise
     every candle would carry a weekend-sized timestamp error. ``now_fn`` is an
     injectable UTC-epoch clock for tests.
+
+    Polling is **adaptive** (latency optimization): instead of a fixed
+    ``poll_sec`` wait, the loop sleeps until just before the forming bar closes
+    and then tightens to ``min_poll`` around the boundary, so a freshly closed
+    bar is picked up in ~``min_poll`` rather than up to a full ``poll_sec``.
+    Mid-bar it relaxes back to ``poll_sec`` to avoid needless IPC churn. On
+    repeated no-rate polls it backs off exponentially (capped at ``poll_sec*5``)
+    to stay gentle on a restarting terminal.
     """
     if mt5 is None:
         import MetaTrader5 as mt5  # noqa: N816
@@ -86,8 +96,10 @@ async def stream_candles(
                 else:
                     log.warning("mt5_reconnect failed %s %s", symbol,
                                 mt5.last_error())
-                    await asyncio.sleep(poll_sec * 5)  # back off while terminal down
-            await asyncio.sleep(poll_sec)
+            # exponential backoff (capped) so a down terminal isn't hammered;
+            # 2**min(streak,4) -> 1,2,4,8,16x, clamped to poll_sec*5.
+            backoff = min(poll_sec * 5, poll_sec * 2 ** min(fail_streak, 4))
+            await asyncio.sleep(max(min_poll, backoff) if poll_sec else 0)
             continue
         fail_streak = 0
         if offset is None:
@@ -119,7 +131,15 @@ async def stream_candles(
                 low=float(r["low"]), close=float(r["close"]),
                 volume=float(r["tick_volume"]),
             )
-        await asyncio.sleep(poll_sec)
+        # Adaptive sleep: time the next poll to the forming bar's close.
+        # secs_into = how far into the current minute the forming bar is (broker
+        # time = UTC + offset). Sleep most of the remaining time, but tighten to
+        # min_poll near the boundary so a just-closed bar is caught promptly.
+        forming_open = int(rates[-1]["time"])
+        secs_into = (now_fn() + offset) - forming_open
+        time_to_close = BAR_SECONDS - (secs_into % BAR_SECONDS)
+        next_sleep = min(poll_sec, max(min_poll, time_to_close + 0.05))
+        await asyncio.sleep(next_sleep)
 
 
 def xauusd_live():

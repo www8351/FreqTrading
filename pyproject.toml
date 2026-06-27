@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = []  # stdlib only at runtime
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "flake8>=7", "black>=24"]
 
 [project.scripts]
 orb = "orb.cli:main"
@@ -21,3 +21,14 @@ packages = ["orb", "orb.feeds"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+extend-exclude = '''
+/(
+    data
+  | log_backups
+  | \.obsidian
+)/
+'''

@@ -106,3 +106,67 @@ def test_init_failure_raises():
 
     with pytest.raises(Mt5FeedError, match="initialize"):
         asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# Adaptive polling (latency optimization)
+# --------------------------------------------------------------------------- #
+def test_adaptive_sleep_times_to_bar_boundary(monkeypatch):
+    # After a closed bar, the loop should sleep until just before the forming
+    # bar closes (not a fixed poll_sec). With the forming bar 59.5s into its
+    # minute, time_to_close = 0.5s -> sleep 0.5 + 0.05 margin = 0.55s.
+    import orb.feeds.mt5feed as feed
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(d):
+        sleeps.append(d)
+
+    monkeypatch.setattr(feed.asyncio, "sleep", fake_sleep)
+
+    t0 = 1765360740
+    forming_open = t0 + 60
+    fake = FakeMt5([
+        [bar(t0, 1, 2, 0.5, 1.5), bar(forming_open, 1.5, 3, 1, 2)],
+        [bar(t0, 1, 2, 0.5, 1.5), bar(forming_open, 1.5, 3, 1, 2.5),
+         bar(forming_open + 60, 2.5, 4, 2, 3)],
+    ])
+    # offset locked to 0; clock sits 59.5s into the forming bar.
+    now = lambda: forming_open + 59.5  # noqa: E731
+    asyncio.run(take(stream_candles(mt5=fake, poll_sec=2.0, tz_offset_sec=0,
+                                    now_fn=now, min_poll=0.1), 2))
+    # the first success-branch sleep is timed to the boundary
+    assert sleeps[0] == 0.55
+
+
+def test_no_rates_backoff_grows(monkeypatch):
+    # Consecutive empty polls back off exponentially (2x each), capped, so a
+    # down terminal isn't hammered. Capture the first two backoff sleeps.
+    import orb.feeds.mt5feed as feed
+
+    class _Stop(Exception):
+        pass
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(d):
+        sleeps.append(d)
+        if len(sleeps) >= 2:
+            raise _Stop
+
+    monkeypatch.setattr(feed.asyncio, "sleep", fake_sleep)
+
+    fake = FakeMt5([None, None, None, None])
+
+    async def drain():
+        try:
+            async for _ in stream_candles(mt5=fake, poll_sec=2.0,
+                                          tz_offset_sec=0, min_poll=0.1):
+                pass
+        except _Stop:
+            pass
+
+    asyncio.run(drain())
+    assert len(sleeps) == 2
+    assert sleeps[0] < sleeps[1]          # exponential growth
+    assert sleeps == [4.0, 8.0]           # 2*2^1, 2*2^2

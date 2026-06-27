@@ -334,8 +334,10 @@ def cmd_live(args) -> int:
     _macro_ro = {"on": False}   # risk-off fire-once latch (guard mode)
 
     broker = None
+    state = None
     if args.broker == "mt5":
         from .broker import Mt5Broker
+        from .brokerstate import BrokerStateCache
 
         broker = Mt5Broker(symbol=args.symbol,
                            default_qty=0.01 if is_svp else (cfg.qty or 0.01),
@@ -344,6 +346,9 @@ def cmd_live(args) -> int:
                            server_tp=False if is_svp else (cfg.tp_close_frac >= 1.0),
                            entry_mode="market" if is_svp else args.entry)
         info = broker.connect()
+        # Background cache: keep blocking balance/positions IPC off the candle
+        # hot path; on_bar reads the snapshot, falling back while it is cold.
+        state = BrokerStateCache(broker)
         print(f"# broker mt5 {info} magic={broker.magic} "
               f"strategy={'svp' if is_svp else 'orb'}", file=sys.stderr)
 
@@ -464,7 +469,7 @@ def cmd_live(args) -> int:
         if breaker is not None:
             try:
                 was = breaker.halted
-                if breaker.update(c.ts.date(), broker.balance()) and not was:
+                if breaker.update(c.ts.date(), state.balance()) and not was:
                     print("# DAILY_LOSS_HALT: closing positions, no new entries "
                           "until next UTC day", file=sys.stderr)
                     broker.close_all("daily_loss_halt")
@@ -499,7 +504,7 @@ def cmd_live(args) -> int:
             # babysitter manages every fill: 70% off at +2R, then chase the
             # remainder with the stop at distance d
             try:
-                for act in sitter.on_bar(broker.my_positions(), c.close):
+                for act in sitter.on_bar(state.positions(), c.close):
                     if act.kind == "partial_close":
                         res = broker.close_ticket(act.ticket, act.volume)
                         if res is not None:
@@ -537,8 +542,18 @@ def cmd_live(args) -> int:
                 print(f"SL_UPDATE_FAIL | {e}", file=sys.stderr)
 
     stream = CandleStream(engine, on_signal=on_signal, on_bar=on_bar)
+
+    async def _run() -> None:
+        if state is not None:
+            state.start()  # background broker-state refresher (off the hot path)
+        try:
+            await stream.run(src)
+        finally:
+            if state is not None:
+                await state.aclose()
+
     try:
-        asyncio.run(stream.run(src))
+        asyncio.run(_run())
     finally:
         if broker is not None:
             broker.shutdown()
