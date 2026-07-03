@@ -1,5 +1,46 @@
 # PROGRESS
 
+## 2026-07-04 — SMC A+ system built end-to-end (orb/smc/ + MQL5 EA + analytics), ARMED, honest verdict recorded
+- **Context:** goal `/alter review` — owner wants a precision multi-TF SMC/ICT XAUUSD system feeding his
+  copy-trader. Locked (AskUserQuestion): Python module + MQL5 EA; ship-armed; 2% risk; add a pro-metrics
+  suite that also scores the existing live bots.
+- **Built (TDD, additive, off by default):**
+  - `orb/smc/`: `mtf.py` (TimeframeAggregator 1m→M15/H4/D1), `structure.py` (StructureTracker
+    fractal BOS/CHOCH), `orderblocks.py` (OrderBlockTracker), `exits.py` (LadderExitManager —
+    Babysitter drop-in, multi-level partials 5R/7R + 10R runner, BE+swing/ATR trail at +2R, tighten-only),
+    `config.py` (SmcConfig), `strategy.py` (SmcEngine: H4 bias/D1 veto, ≥3 confluences with htf_poi
+    mandatory, structural SL, dormant when no bias). Magic 20260621.
+  - `orb/analytics.py` (pure metrics) + `scripts/live_report.py` (MT5 deals-by-magic report).
+  - `mql5/SmcXau_EA.mq5` (self-contained EA; recompute-per-M15-bar; deal-history ladder state).
+  - Wiring: `--strategy smc` in `orb/cli.py` (engine/broker/sizing/ladder + cmd_replay dispatch) and
+    `scripts/sim_realistic.py` `run_smc()`.
+- **Method:** parallel subagent build (foundation 6 modules → SmcEngine → integration trio), each TDD,
+  plus an adversarial verify workflow (4 read-only agents) on the plan's integration claims before coding.
+- **Re-arm fix:** `run_smc` calls `engine.force_flat` at loop top once the sim position fully closes.
+  SMC holds multi-day (unlike SVP's session-exit), so the engine must stay IN position across sessions
+  until actually flat; without this it locked after 1 trade (91/73 trades after the fix).
+- **Backtest (honest, real gold cost):** 0303-0612 PF **0.46** (n73: 6 winners avg +$73.6 / 67 losers
+  avg −$14.3), 0321-0612 PF **0.15**. Asymmetry is real (winners ~5R via the ladder, losers capped;
+  4-24h holds fire) but gold yields too few winners to beat cost — reconfirms D-016…D-020. Shipped armed
+  per owner choice. See D-027.
+- **Verify:** `python -m pytest -q` = **445 passed**. ORB/SVP paths unchanged.
+
+## 2026-07-04 — SMC strategy test suite: 4 failures fixed (all fixture/helper bugs, engine untouched)
+- **Context:** `orb/smc/strategy.py` (SmcEngine) + `tests/test_smc_strategy.py` built TDD; 11/15 passing.
+- **Root causes (all in the TEST, NOT the engine):**
+  1. `test_only_two_confluences_no_entry`: close==POC==equilibrium made `premium_discount` fire too,
+     giving align+pd+poi=3. Fixed fixture: parked close at `poc+1.0` (pd false, poi still within tol).
+  2/3. `test_stop_too_wide_skips`, `test_max_trades_per_day_blocks_third`: the `_armed_long_engine`
+     helper left a LEGITIMATE warmup ENTRY open (H4 BOS block fires disp+pd+poi via h4_ob the instant
+     bias turns LONG — correct engine behaviour). Helper now resets `_position/_state/_traded_today`
+     after warmup so tests start truly flat+armed.
+  4. `test_end_to_end_entry_from_1m_stream`: (a) `b2` loop built an invalid candle (`lo=sl-2.0` could
+     exceed `hi` when `disp_open<sl`) → CandleError; fixed by making hi/lo a true envelope of {o,c,
+     sweep_target}. (b) same stale warmup position blocked the sculpted entry; cleared it after the
+     bias assertion. Test now fires a REAL stream entry `conf=sweep+align+poi 3/6 poi=poc`.
+- **Verified:** `tests/test_smc_strategy.py` 15/15; full suite `python -m pytest -q` 422 passed.
+- **Engine code: unchanged.** No SmcEngine bug found; the warmup entry is correct A+ behaviour.
+
 <<<<<<< Updated upstream
 =======
 ## 2026-06-27 — Public packaging + latency optimizations (no behaviour change)

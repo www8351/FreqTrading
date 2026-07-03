@@ -1,5 +1,47 @@
 # STATUS
 
+## 2026-07-04 — SMC A+ system COMPLETE: orb/smc/ + MQL5 EA + pro-metrics (445/445 suite, ARMED)
+- Delivered the owner's multi-timeframe SMC/ICT XAUUSD system end-to-end (goal `/alter review`).
+  New standalone `orb/smc/` package (magic **20260621**), a self-contained MQL5 EA, and a pro-metrics
+  analytics suite. **445 tests green**; ORB/SVP paths byte-unchanged; off by default (opt-in `--strategy smc`).
+- **`orb/smc/`** (all TDD, stdlib, O(1)/bar): `mtf.py` TimeframeAggregator (1m→M15/H4/D1, UTC-aligned);
+  `structure.py` StructureTracker (fractal BOS/CHOCH, close-based breaks); `orderblocks.py`
+  OrderBlockTracker (displacement OB, promote-on-BOS, mitigate/expire); `exits.py` LadderExitManager
+  (Babysitter-drop-in: partials 5R/7R + 10R runner, BE+swing/ATR trail armed only at +2R, tighten-only);
+  `config.py` SmcConfig; `strategy.py` SmcEngine — H4 bias / D1 veto, ≥3 confluences (htf_poi MANDATORY:
+  htf_poi/ltf_sweep/displacement/cisd/alignment/premium_discount), structural SL, 2% sizing, dormant
+  when no bias.
+- **`orb/analytics.py`** (pure) + **`scripts/live_report.py`** (MT5 deals-by-magic): PF, win rate,
+  day-win%, trade-win%, avg win/loss, maxDD $/%, recovery factor, consistency (largest-day share),
+  daily net+cum table, by-hour, by-duration. Scores backtests AND the live bots (20260610/11/20/21).
+- **`mql5/SmcXau_EA.mq5`**: single-file EA (only stock `<Trade/Trade.mqh>`), recompute-per-M15-bar
+  from closed bars (deterministic restart recovery for the copy-trade master); 2% sizing, layered
+  exits, deal-history-derived ladder state, one-position/daily-halt guards, no averaging/grid.
+- **run_smc re-arm fix (important):** the sim now calls `engine.force_flat` at the top of the loop
+  when the sim's real position has fully closed — SMC is a **multi-day hold** (unlike SVP which
+  session-exits), so the engine stays IN position across sessions until the trade is actually flat.
+  Without this the engine locked after 1 trade. Live cli already syncs via force_flat when flat.
+- **Honest backtest verdict (unchanged from D-016…D-020):** at real gold cost the edge is negative —
+  0303-0612 window PF **0.46** (73 trades, 6 winners avg +$73.6 / 67 losers avg −$14.3), 0321-0612
+  PF **0.15**. The exit ladder works exactly as designed (asymmetric: winners ~5R, losers capped at
+  BE/small; multi-day holds fire), but gold doesn't yield enough winners to beat cost. Owner chose
+  **ship-armed** knowing this. See D-027.
+- **Verify / run:** `python -m pytest -q` (445); `python scripts/sim_realistic.py data/xauusd_1m_*.csv
+  --strategy smc --spread 1.10 --start-balance 1000`; `python scripts/live_report.py --magic 20260611
+  --days 30`; armed demo: `python -m orb live --source orb.feeds.mt5feed:xauusd_live --broker mt5
+  --strategy smc --symbol XAUUSD.ecn --max-daily-loss 110`. EA: copy to `MQL5/Experts/`, F7, attach
+  XAUUSD.ecn M15 demo.
+- **Next:** owner runs the EA in MetaEditor/Strategy-Tester + feeds the demo signal to the copy-trader;
+  everything staged/uncommitted for owner review.
+
+## 2026-07-04 — SMC strategy tests all green (422/422 suite)
+- `orb/smc/` module (SmcEngine A+ entry state machine) + its test files are present (untracked).
+- Fixed the 4 failing `tests/test_smc_strategy.py` cases — ALL were test fixture/helper bugs, engine
+  left unchanged. `tests/test_smc_strategy.py` 15/15; full `python -m pytest -q` = 422 passed.
+- Key finding: `_armed_long_engine` / the end-to-end fixture must reset the LEGITIMATE warmup entry
+  (H4 BOS fires an A+ setup the instant bias turns LONG) to start flat+armed. See PROGRESS 2026-07-04.
+- Next: `orb/smc/` is new/untracked — decide whether to commit; no engine changes pending.
+
 <<<<<<< Updated upstream
 _Last updated: 2026-06-21_
 =======

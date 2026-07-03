@@ -1,5 +1,43 @@
 # DECISIONS
 
+## D-027 — SMC A+ multi-timeframe system as a standalone strategy (built, armed, honest negative edge)
+- **Date:** 2026-07-04
+- **Context:** Goal `/alter review` — owner asked for a precision, low-frequency SMC/ICT XAUUSD system
+  (H4/D1 bias via BOS/CHOCH + liquidity sweeps + unmitigated order blocks + POC; M5/M15 confirmation;
+  ≥3 confluences; R:R 1:5–1:10; hard structural SL; layered partials; BE + swing/ATR trail at +2R; zero
+  averaging/martingale/grid) to feed his MT5 copy-trader. Locked via AskUserQuestion: **Python module +
+  MQL5 EA**; **ship-armed**; **2% risk**; add a **pro-metrics suite** that also scores the live bots.
+- **Decided / built (all additive, off by default, ORB/SVP byte-unchanged):**
+  - Standalone `orb/smc/` package, distinct magic **20260621**, opt-in `--strategy smc` (mirrors the
+    SVP module pattern, D-015). New: TimeframeAggregator (1m→M15/H4/D1), StructureTracker (fractal
+    close-based BOS/CHOCH), OrderBlockTracker (displacement OB, promote-on-BOS, mitigate/expire),
+    LadderExitManager (Babysitter-compatible, multi-level partials 5R/7R + 10R runner, BE+trail at 2R,
+    tighten-only), SmcConfig, SmcEngine (H4 primary / **D1 veto** bias; confluence gate with **htf_poi
+    mandatory** + ≥3 of {htf_poi, ltf_sweep, displacement, cisd, alignment, premium_discount}; structural
+    SL capped at `stop_max_dist` → skip if wider, fail-safe; 2% sizing via `compute_lot`).
+  - `orb/analytics.py` (pure) + `scripts/live_report.py`: PF, win/day-win/trade-win, avg win/loss, maxDD
+    $/%, recovery factor, consistency (largest-day share), daily net+cum, by-hour, by-duration — on
+    backtests AND live MT5 deal history by magic.
+  - `mql5/SmcXau_EA.mq5`: single stock-include EA, **recompute-per-M15-bar from closed bars**
+    (deterministic restart recovery — a copy-trade master requirement), ladder state derived from deal
+    history, one-position/daily-halt guards.
+- **Bias = H4 primary + D1 veto (not strict both-aligned):** strict D1 agreement on fractal swings is
+  dormant almost always over ~14wk of data (untestable); veto preserves selectivity while keeping the
+  strategy actionable. `htf_bias=None` ⇒ zero entries (spec: dormant in ranging regimes).
+- **run_smc re-arm (harness):** the sim re-syncs the engine via `force_flat` at loop top once the sim's
+  real position fully closes. SMC is a **multi-day hold**, so — unlike SVP which force-exits at each
+  session boundary — the engine must stay IN position across sessions until actually flat. Rejected the
+  SVP-style session-exit (would kill 1:10 swing runners every midnight).
+- **Verdict — honest negative edge (reconfirms D-016…D-020):** at real gold cost the system loses —
+  0303-0612 PF **0.46** (n73, 6 winners avg +$73.6 / 67 losers avg −$14.3), 0321-0612 PF **0.15**. The
+  exit ladder works as designed (asymmetric: ~5R winners, BE/small losers; multi-day holds fire), but
+  gold does not produce enough winners to beat cost. **Shipped armed anyway per the owner's explicit
+  choice** — armed ≠ a profitability claim; the negative verdict is recorded here and in STATUS.
+- **Rejected:** MQL5-only (loses the Python backtest gate); Python-only (owner needs the EA for the
+  copy-trade master); folding SMC logic into the ORB engine (breaks purity/tests — kept standalone).
+- **Status:** feature-complete, **445 tests green**, staged/uncommitted for owner review. Revisitable
+  only with a structurally different signal or instrument (the overfit/tuning path is exhausted, D-020).
+
 <<<<<<< Updated upstream
 =======
 ## D-026 — Public packaging is strictly accurate: low-latency execution engine, no ML/profit claims
