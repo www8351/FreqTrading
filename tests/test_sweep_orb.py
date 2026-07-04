@@ -4,6 +4,8 @@ from __future__ import annotations
 import pathlib
 import sys
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
 
 from sweep_orb import grid_iter, live_filter, sign_stable, split_halves  # noqa: E402
@@ -50,7 +52,15 @@ from sim_realistic import load_csv            # noqa: E402
 
 US100 = "data/us100_1m_20260303_20260612.csv"
 
+# data/ CSVs are gitignored (45 MB, local-only) — skip the data-backed wiring
+# smoke tests when absent (e.g. CI). The pure-helper tests above still run.
+_needs_data = pytest.mark.skipif(
+    not (pathlib.Path(__file__).resolve().parents[1] / US100).exists(),
+    reason="data/ backtest CSVs not present (gitignored; local-only)",
+)
 
+
+@_needs_data
 def test_score_shape_on_real_slice():
     candles = load_csv([US100])[:12000]
     s = score(candles, SPECS["US100"], params={}, spread=1.0)
@@ -59,6 +69,7 @@ def test_score_shape_on_real_slice():
         assert "pf" in s[k] and "pnl" in s[k] and "n" in s[k]
 
 
+@_needs_data
 def test_tf_sweep_returns_each_tf():
     candles = load_csv([US100])[:12000]
     out = tf_sweep(candles, SPECS["US100"], params={}, tfs=["1m", "5m"], spread=1.0)

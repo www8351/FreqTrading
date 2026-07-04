@@ -4,12 +4,20 @@ from __future__ import annotations
 import pathlib
 import sys
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
 
 import sim_realistic  # noqa: E402
 from sim_realistic import _orb_cfg, load_csv, run  # noqa: E402
 
 US100 = "data/us100_1m_20260303_20260612.csv"
+
+# data/ CSVs are gitignored (45 MB, local-only) — skip when absent (e.g. CI).
+pytestmark = pytest.mark.skipif(
+    not (pathlib.Path(__file__).resolve().parents[1] / US100).exists(),
+    reason="data/ backtest CSVs not present (gitignored; local-only)",
+)
 
 
 def _candles():
