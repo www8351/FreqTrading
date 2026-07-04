@@ -21,7 +21,7 @@ macro_state.json
 log_backups/
 
 # generated market data (regenerable via scripts/fetch_mt5_history.py)
-/data/
+
 /gold.csv
 DECISIONS.md
 PROGRESS.md
