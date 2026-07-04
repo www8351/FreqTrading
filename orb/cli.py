@@ -23,6 +23,7 @@ from datetime import datetime, time, timezone
 from .engine import OrbEngine
 from .models import (Candle, CandleError, OrbConfig, OrbError, OutOfOrderError,
                      Signal, State)
+from .smc import SMC_MAGIC, SmcConfig, SmcEngine
 from .svp import SVP_MAGIC, SvpConfig, SvpEngine, compute_lot
 
 
@@ -188,6 +189,25 @@ def build_svp_config(args) -> SvpConfig:
     return SvpConfig(**base)
 
 
+def build_smc_config(args) -> SmcConfig:
+    """Assemble an SmcConfig from --smc-* flags (only used with --strategy smc)."""
+    base: dict = {}
+
+    def setif(key, val):
+        if val is not None:
+            base[key] = val
+
+    setif("min_confluences", getattr(args, "smc_min_confluences", None))
+    setif("risk_pct", getattr(args, "smc_risk_pct", None))
+    setif("disp_atr_mult", getattr(args, "smc_disp_atr_mult", None))
+    setif("poc_tol", getattr(args, "smc_poc_tol", None))
+    setif("stop_max_dist", getattr(args, "smc_stop_max_dist", None))
+    setif("max_trades_per_day", getattr(args, "smc_max_trades_per_day", None))
+    setif("trail_mode", getattr(args, "smc_trail_mode", None))
+    setif("final_tp_r", getattr(args, "smc_final_tp_r", None))
+    return SmcConfig(**base)
+
+
 # --------------------------------------------------------------------------- #
 # Commands
 # --------------------------------------------------------------------------- #
@@ -200,7 +220,15 @@ def cmd_replay(args) -> int:
             return 2
         args.session_open = first.ts.strftime("%H:%M")
         candles = itertools.chain([first], candles)
-    cfg = build_config(args)
+    strategy = getattr(args, "strategy", "orb")
+    is_svp = strategy == "svp"
+    is_smc = strategy == "smc"
+    if is_svp:
+        cfg = build_svp_config(args)
+    elif is_smc:
+        cfg = build_smc_config(args)
+    else:
+        cfg = build_config(args)
     dp = cfg.instrument_dp
     if not args.quiet:
         print(f"# config {cfg}", file=sys.stderr)
@@ -215,11 +243,17 @@ def cmd_replay(args) -> int:
     def on_signal(sig: Signal):
         counts[sig.kind.value] += 1
 
-    engine = OrbEngine(cfg, on_transition=on_transition, on_signal=on_signal)
+    if is_svp:
+        engine = SvpEngine(cfg, on_transition=on_transition, on_signal=on_signal)
+    elif is_smc:
+        engine = SmcEngine(cfg, on_transition=on_transition, on_signal=on_signal)
+    else:
+        engine = OrbEngine(cfg, on_transition=on_transition, on_signal=on_signal)
     try:
         for c in candles:
             sig = engine.on_candle(c)
-            sid = engine.snapshot()["session_id"]
+            snap = engine.snapshot()
+            sid = snap.get("session_id") or snap.get("date")
             if sid:
                 sessions.add(sid)
             if sig is not None:
@@ -234,12 +268,12 @@ def cmd_replay(args) -> int:
         file=sys.stderr,
     )
     if not any(counts.values()):
-        print(
-            f"WARN | no signals: session open {cfg.session_open_utc:%H:%M} UTC may "
-            f"fall outside the data window; try --session-open auto "
-            f"(uses first candle time) or an explicit HH:MM inside the data.",
-            file=sys.stderr,
-        )
+        so = getattr(cfg, "session_open_utc", None)
+        hint = (f"session open {so:%H:%M} UTC may fall outside the data window; "
+                f"try --session-open auto (uses first candle time) or an explicit "
+                f"HH:MM inside the data." if so is not None
+                else "the strategy found no setups in this data window.")
+        print(f"WARN | no signals: {hint}", file=sys.stderr)
     return 0
 
 
@@ -276,9 +310,17 @@ def cmd_live(args) -> int:
     from .stream import CandleStream
 
     cfg = build_config(args)
-    is_svp = getattr(args, "strategy", "orb") == "svp"
+    strategy = getattr(args, "strategy", "orb")
+    is_svp = strategy == "svp"
+    is_smc = strategy == "smc"
     svp_cfg = build_svp_config(args) if is_svp else None
-    dp = svp_cfg.instrument_dp if is_svp else cfg.instrument_dp
+    smc_cfg = build_smc_config(args) if is_smc else None
+    if is_svp:
+        dp = svp_cfg.instrument_dp
+    elif is_smc:
+        dp = smc_cfg.instrument_dp
+    else:
+        dp = cfg.instrument_dp
     mod_name, _, factory = args.source.partition(":")
     if not factory:
         print("FATAL | --source must be 'module:factory'", file=sys.stderr)
@@ -291,6 +333,15 @@ def cmd_live(args) -> int:
 
         breaker = DailyLossBreaker(args.max_daily_loss)
         print(f"# daily loss breaker: ${args.max_daily_loss}", file=sys.stderr)
+
+    consec = None
+    if getattr(args, "max_consec_losses", 0):
+        from .riskguard import ConsecutiveLossGuard
+
+        consec = ConsecutiveLossGuard(args.max_consec_losses)
+        print(f"# consec-loss guard: entries halt after "
+              f"{args.max_consec_losses} straight losing closes (daily reset)",
+              file=sys.stderr)
 
     spike = None
     if args.spike_cancel:
@@ -317,6 +368,30 @@ def cmd_live(args) -> int:
         print(f"# quarter-filter: entries only in day {'+'.join(allowed)} "
               f"(NY 6h cycle: Q2=London Q3=AM)", file=sys.stderr)
 
+    killzones = None
+    if getattr(args, "killzones", None):
+        from .execguard import SessionGate, parse_killzones
+
+        try:
+            killzones = SessionGate(parse_killzones(args.killzones))
+        except ValueError as e:
+            print(f"FATAL | {e}", file=sys.stderr)
+            return 2
+        print(f"# killzones: entries only inside {args.killzones} UTC "
+              f"(fixed UTC, no DST tracking)", file=sys.stderr)
+
+    spread_gate = None
+    if getattr(args, "max_spread", None) is not None:
+        from .execguard import SpreadGate
+
+        try:
+            spread_gate = SpreadGate(args.max_spread)
+        except ValueError as e:
+            print(f"FATAL | {e}", file=sys.stderr)
+            return 2
+        print(f"# spread-gate: entries skipped while spread > "
+              f"{args.max_spread}", file=sys.stderr)
+
     macro = None
     macro_mode = getattr(args, "macro_mode", "off")
     if macro_mode != "off":
@@ -333,24 +408,108 @@ def cmd_live(args) -> int:
               f"asset={macro.asset_key}", file=sys.stderr)
     _macro_ro = {"on": False}   # risk-off fire-once latch (guard mode)
 
+    # ---- Part 2 event pipeline: one hub fans every broker action out to the
+    # configured sinks (JSONL trade log / copy-trade broadcaster / consec-loss
+    # guard). No consumer -> no hub -> broker on_event=None (zero overhead).
+    hub = None
+    bcaster = None
+    if getattr(args, "trade_log", None) or getattr(args, "broadcast", None) \
+            or consec is not None:
+        from .tradeevents import EventHub, TradeEventLog, to_payload
+
+        hub = EventHub()
+        if getattr(args, "trade_log", None):
+            hub.add(TradeEventLog(args.trade_log).write)
+            print(f"# trade-log: {args.trade_log}", file=sys.stderr)
+        if getattr(args, "broadcast", None):
+            secret = os.environ.get("COPYTRADE_SECRET")
+            if not secret:
+                print("FATAL | --broadcast requires COPYTRADE_SECRET in the "
+                      "environment (never pass the secret as a CLI arg)",
+                      file=sys.stderr)
+                return 2
+            from .broadcast import Broadcaster
+
+            bcaster = Broadcaster(args.broadcast, secret.encode(),
+                                  spool_path=args.broadcast_spool)
+            hub.add(lambda ev: bcaster.publish(to_payload(ev)))
+            print(f"# broadcast: {args.broadcast} "
+                  f"spool={args.broadcast_spool}", file=sys.stderr)
+        if consec is not None:
+            def _consec_sink(ev):
+                if ev.action in ("close", "partial_close") \
+                        and ev.pnl is not None:
+                    consec.record(ev.pnl)
+            hub.add(_consec_sink)
+
     broker = None
     state = None
     if args.broker == "mt5":
         from .broker import Mt5Broker
         from .brokerstate import BrokerStateCache
 
+        if getattr(args, "resolve_symbol", False):
+            import MetaTrader5 as _mt5  # noqa: N816 — scan needs a live handle
+
+            from .symbols import SymbolResolveError, resolve_symbol
+
+            if not _mt5.initialize():
+                print(f"FATAL | mt5.initialize failed: {_mt5.last_error()}",
+                      file=sys.stderr)
+                return 2
+            try:
+                resolved = resolve_symbol(_mt5, args.symbol)
+            except SymbolResolveError as e:
+                print(f"FATAL | {e}", file=sys.stderr)
+                return 2
+            print(f"# symbol_resolved {args.symbol} -> {resolved}",
+                  file=sys.stderr)
+            args.symbol = resolved
+
+        retry = None
+        if getattr(args, "retry_policy", "off") == "on":
+            from .broker.retcodes import RetryPolicy
+
+            retry = RetryPolicy(max_retries=args.max_retries)
+            print(f"# retry-policy: on max_retries={args.max_retries}",
+                  file=sys.stderr)
+
+        if is_smc:
+            _magic = SMC_MAGIC
+        elif is_svp:
+            _magic = SVP_MAGIC
+        else:
+            _magic = 20260610
         broker = Mt5Broker(symbol=args.symbol,
-                           default_qty=0.01 if is_svp else (cfg.qty or 0.01),
+                           default_qty=0.01 if (is_svp or is_smc)
+                           else (cfg.qty or 0.01),
                            allow_live=args.live,
-                           magic=SVP_MAGIC if is_svp else 20260610,
-                           server_tp=False if is_svp else (cfg.tp_close_frac >= 1.0),
-                           entry_mode="market" if is_svp else args.entry)
+                           magic=_magic,
+                           server_tp=False if (is_svp or is_smc)
+                           else (cfg.tp_close_frac >= 1.0),
+                           entry_mode="market" if (is_svp or is_smc)
+                           else args.entry,
+                           on_event=hub.emit if hub is not None else None,
+                           strategy=strategy,
+                           retry=retry)
         info = broker.connect()
         # Background cache: keep blocking balance/positions IPC off the candle
         # hot path; on_bar reads the snapshot, falling back while it is cold.
         state = BrokerStateCache(broker)
         print(f"# broker mt5 {info} magic={broker.magic} "
-              f"strategy={'svp' if is_svp else 'orb'}", file=sys.stderr)
+              f"strategy={strategy}", file=sys.stderr)
+        if getattr(args, "max_slippage", None) is not None:
+            # server-side hard cap: deviation (points) = max_slippage / point
+            _pt = getattr(broker._mt5.symbol_info(args.symbol),
+                          "point", 0.0) or 0.0
+            if _pt > 0:
+                broker.deviation = int(round(args.max_slippage / _pt))
+                print(f"# max-slippage: {args.max_slippage} -> "
+                      f"deviation={broker.deviation} points", file=sys.stderr)
+            else:
+                print(f"# max-slippage: {args.max_slippage} but symbol point "
+                      f"unknown; keeping deviation={broker.deviation}",
+                      file=sys.stderr)
 
     def on_transition(tr):
         if not args.quiet:
@@ -366,6 +525,11 @@ def cmd_live(args) -> int:
         if breaker is not None and breaker.halted and sig.kind is SignalKind.ENTRY:
             print("# HALTED daily loss limit: entry skipped", file=sys.stderr)
             return
+        if consec is not None and consec.blocked \
+                and sig.kind is SignalKind.ENTRY:
+            print(f"# CONSEC_SKIP {consec.streak} straight losses: entry "
+                  f"skipped until next UTC day", file=sys.stderr)
+            return
         if trueopen is not None and sig.kind is SignalKind.ENTRY \
                 and trueopen.zone(sig.price) == "dead_zone":
             # engine stays BREAKOUT but no order exists; the on_bar sync
@@ -380,6 +544,11 @@ def cmd_live(args) -> int:
                 print(f"# QUARTER_SKIP {q}: entry skipped (allowed "
                       f"{'+'.join(allowed)})", file=sys.stderr)
                 return
+        if killzones is not None and sig.kind is SignalKind.ENTRY \
+                and not killzones.allows(sig.ts):
+            print(f"# KILLZONE_SKIP {sig.ts:%H:%M}: entry skipped (windows "
+                  f"{args.killzones} UTC)", file=sys.stderr)
+            return
         if macro is not None and sig.kind is SignalKind.ENTRY:
             dec = macro.evaluate_entry(sig)
             if dec.action == "VETO":
@@ -391,61 +560,149 @@ def cmd_live(args) -> int:
             elif dec.qty is not None and sig.qty is not None \
                     and abs(dec.qty - sig.qty) > 1e-9:
                 if macro_mode in ("filter", "guard"):
-                    import dataclasses
                     print(f"# MACRO_SCALE qty {sig.qty}->{dec.qty} ({dec.reason})",
                           file=sys.stderr)
                     sig = dataclasses.replace(sig, qty=dec.qty)
                 else:
                     print(f"# MACRO_SHADOW would_scale qty {sig.qty}->{dec.qty}",
                           file=sys.stderr)
-        if is_svp and sig.kind is SignalKind.ENTRY:
+        if (is_svp or is_smc) and sig.kind is SignalKind.ENTRY:
             # structural-stop dynamic sizing: lot so the loss at the structural
             # stop is risk_pct of balance, capped to the remaining daily budget.
+            # smc MUST always inject qty (execute() falls back to default_qty
+            # when sig.qty is None), so this branch runs for both strategies.
+            tag = "SMC" if is_smc else "SVP"
+            risk_pct = smc_cfg.risk_pct if is_smc else svp_cfg.risk_pct
             if sig.stop is None:
-                print("# SVP_SKIP no structural stop", file=sys.stderr)
+                print(f"# {tag}_SKIP no structural stop", file=sys.stderr)
                 return
             specs = broker.symbol_specs()
             bal = broker.balance()
             remaining = None
             if breaker is not None:
                 remaining = max(0.0, breaker.max_daily_loss + breaker.day_pnl)
-            lot = compute_lot(bal, svp_cfg.risk_pct, sig.price, sig.stop,
+            lot = compute_lot(bal, risk_pct, sig.price, sig.stop,
                               specs["value_per_move"], specs["volume_min"],
                               specs["volume_step"], specs["volume_max"],
                               max_risk=remaining)
             stop_dist = abs(sig.price - sig.stop)
             if lot <= 0:
-                print(f"# SVP_SKIP lot=0 stop_dist={stop_dist:.{dp}f} bal={bal} "
+                print(f"# {tag}_SKIP lot=0 stop_dist={stop_dist:.{dp}f} bal={bal} "
                       f"budget={remaining}", file=sys.stderr)
                 return
             sig = dataclasses.replace(sig, qty=lot)
-            print(f"# SVP_SIZE lot={lot} risk={svp_cfg.risk_pct}% "
+            print(f"# {tag}_SIZE lot={lot} risk={risk_pct}% "
                   f"stop_dist={stop_dist:.{dp}f}", file=sys.stderr)
+        if not (is_svp or is_smc) and sig.kind is SignalKind.ENTRY \
+                and getattr(args, "risk_pct", None) is not None:
+            # ORB equity sizing (clone of the SVP block above): lot so the
+            # loss at the signal stop is risk_pct of balance, capped to the
+            # remaining daily budget. Flag default None keeps fixed --qty.
+            if sig.stop is None:
+                print("# ORB_SKIP no stop on signal", file=sys.stderr)
+                return
+            specs = broker.symbol_specs()
+            bal = broker.balance()
+            remaining = None
+            if breaker is not None:
+                remaining = max(0.0, breaker.max_daily_loss + breaker.day_pnl)
+            lot = compute_lot(bal, args.risk_pct, sig.price, sig.stop,
+                              specs["value_per_move"], specs["volume_min"],
+                              specs["volume_step"], specs["volume_max"],
+                              max_risk=remaining)
+            stop_dist = abs(sig.price - sig.stop)
+            if lot <= 0:
+                print(f"# ORB_SKIP lot=0 stop_dist={stop_dist:.{dp}f} "
+                      f"bal={bal} budget={remaining}", file=sys.stderr)
+                return
+            sig = dataclasses.replace(sig, qty=lot)
+            print(f"# ORB_SIZE lot={lot} risk={args.risk_pct}% "
+                  f"stop_dist={stop_dist:.{dp}f}", file=sys.stderr)
+        if spread_gate is not None and sig.kind is SignalKind.ENTRY:
+            # freshest tick, checked IMMEDIATELY before the order goes out
+            try:
+                tick = broker.current_spread()
+            except OrbError as e:
+                print(f"SPREAD_FAIL | {e}: entry skipped", file=sys.stderr)
+                return
+            allowed_sp, spread = spread_gate.allows(tick["bid"], tick["ask"])
+            if not allowed_sp:
+                print(f"# SPREAD_SKIP spread={spread} "
+                      f"max={spread_gate.max_spread}: entry skipped",
+                      file=sys.stderr)
+                return
         try:
             res = broker.execute(sig)
             if res is not None:
                 print(f"# order {res}", file=sys.stderr)
         except OrbError as e:
             print(f"ORDER_FAIL | {e}", file=sys.stderr)
+            return
+        if (sig.kind is SignalKind.ENTRY and res is not None
+                and broker.entry_mode == "market" and res.get("price")
+                and (getattr(args, "max_slippage", None) is not None
+                     or getattr(args, "rr_floor", None) is not None)):
+            # post-fill R:R verification against the ORIGINAL signal levels:
+            # the broker re-anchors SL/TP around the fill (risk distance kept)
+            # so slippage shows up here as achieved-R:R degradation.
+            from .execguard import assess_fill
+
+            fa = assess_fill(sig.price, float(res["price"]), sig.stop,
+                             sig.tp, max_slippage=args.max_slippage,
+                             rr_floor=args.rr_floor)
+            print(f"# FILL slippage={fa.slippage} "
+                  f"rr_planned={_fmt_num(fa.rr_planned, 2)} "
+                  f"rr_achieved={_fmt_num(fa.rr_achieved, 2)} "
+                  f"risk_inflation_r={_fmt_num(fa.risk_inflation_r, 3)}",
+                  file=sys.stderr)
+            if fa.breach or fa.degraded:
+                why = "slippage" if fa.breach else "rr_floor"
+                policy = getattr(args, "slippage_policy", "keep")
+                print(f"# ALERT {why}_breach slippage={fa.slippage} "
+                      f"rr_achieved={_fmt_num(fa.rr_achieved, 2)} "
+                      f"policy={policy}", file=sys.stderr)
+                if policy == "close":
+                    try:
+                        broker.close_all("slippage_abort")
+                    except OrbError as e:
+                        print(f"ORDER_FAIL | {e}", file=sys.stderr)
 
     if is_svp:
         engine = SvpEngine(svp_cfg, on_transition=on_transition)
+    elif is_smc:
+        engine = SmcEngine(smc_cfg, on_transition=on_transition)
     else:
         engine = OrbEngine(cfg, on_transition=on_transition)
 
     sitter = None
-    if broker is not None and (broker.entry_mode == "limit" or is_svp):
-        from .babysitter import Babysitter
+    if broker is not None and (broker.entry_mode == "limit" or is_svp or is_smc):
+        if is_smc:
+            from .smc.exits import LadderExitManager
 
-        if is_svp:
-            sitter = Babysitter(partial_frac=svp_cfg.partial_frac,
-                                partial_at_r=svp_cfg.partial_at_r)
+            sitter = LadderExitManager(
+                partial_levels=smc_cfg.partial_levels,
+                final_tp_r=smc_cfg.final_tp_r, be_at_r=smc_cfg.be_at_r,
+                trail_start_r=smc_cfg.trail_start_r, trail_mode=smc_cfg.trail_mode,
+                trail_atr_mult=smc_cfg.trail_atr_mult,
+                trail_buffer=smc_cfg.trail_buffer,
+                swing_lookback=smc_cfg.swing_lookback, atr_period=smc_cfg.atr_period,
+                trail_tf_min=smc_cfg.trigger_tf_min)
+            print(f"# ladder exits: partials {smc_cfg.partial_levels} "
+                  f"final={smc_cfg.final_tp_r}R be={smc_cfg.be_at_r}R "
+                  f"trail={smc_cfg.trail_mode}@{smc_cfg.trail_start_r}R",
+                  file=sys.stderr)
         else:
-            sitter = Babysitter(partial_frac=cfg.tp_close_frac
-                                if cfg.tp_close_frac < 1.0 else 0.7,
-                                partial_at_r=cfg.tp_rrr or 2.0)
-        print(f"# babysitter: {sitter.partial_frac:.0%} off at "
-              f"+{sitter.partial_at_r}R, stop chases the rest", file=sys.stderr)
+            from .babysitter import Babysitter
+
+            if is_svp:
+                sitter = Babysitter(partial_frac=svp_cfg.partial_frac,
+                                    partial_at_r=svp_cfg.partial_at_r)
+            else:
+                sitter = Babysitter(partial_frac=cfg.tp_close_frac
+                                    if cfg.tp_close_frac < 1.0 else 0.7,
+                                    partial_at_r=cfg.tp_rrr or 2.0)
+            print(f"# babysitter: {sitter.partial_frac:.0%} off at "
+                  f"+{sitter.partial_at_r}R, stop chases the rest", file=sys.stderr)
 
     def on_bar(c):
         """After every bar: sync engine vs broker.
@@ -456,6 +713,8 @@ def cmd_live(args) -> int:
         """
         if trueopen is not None:
             trueopen.update(c)
+        if consec is not None:
+            consec.on_period(c.ts.date())  # streak resets on a new UTC day
         if broker is None:
             return
         if spike is not None and spike.update(c.high, c.low) \
@@ -492,7 +751,7 @@ def cmd_live(args) -> int:
                     print("# MACRO_RISK_ON: risk-off cleared", file=sys.stderr)
             except OrbError as e:
                 print(f"MACRO_FAIL | {e}", file=sys.stderr)
-        if broker.entry_mode == "limit" or is_svp:
+        if broker.entry_mode == "limit" or is_svp or is_smc:
             if broker.entry_mode == "limit" and args.limit_ttl:
                 try:
                     n = broker.cancel_expired(int(args.limit_ttl * 60))
@@ -501,6 +760,10 @@ def cmd_live(args) -> int:
                               f"(>{args.limit_ttl}min)", file=sys.stderr)
                 except OrbError as e:
                     print(f"TTL_FAIL | {e}", file=sys.stderr)
+            # ladder needs the 1m feed to build higher-TF trail context;
+            # Babysitter/svp have no observe() so this is smc-only.
+            if hasattr(sitter, "observe"):
+                sitter.observe(c)
             # babysitter manages every fill: 70% off at +2R, then chase the
             # remainder with the stop at distance d
             try:
@@ -555,14 +818,75 @@ def cmd_live(args) -> int:
     try:
         asyncio.run(_run())
     finally:
+        if bcaster is not None:
+            bcaster.close()
         if broker is not None:
             broker.shutdown()
+        if broker is not None and getattr(broker, "retcode_counts", None):
+            print(f"# retcode_counts {dict(broker.retcode_counts)}",
+                  file=sys.stderr)
     return 0
 
 
 # --------------------------------------------------------------------------- #
 # Argument parsing
 # --------------------------------------------------------------------------- #
+def _add_svp_flags(p) -> None:
+    """--svp-* tuning flags (shared by live and replay)."""
+    p.add_argument("--svp-ticks-per-row", dest="svp_ticks_per_row", type=int,
+                   help="SVP profile row width in ticks (default 10)")
+    p.add_argument("--svp-tick-size", dest="svp_tick_size", type=float,
+                   help="SVP tick size (default 0.01 = gold)")
+    p.add_argument("--svp-va-pct", dest="svp_va_pct", type=float,
+                   help="SVP value-area fraction (default 0.70)")
+    p.add_argument("--svp-hvn-frac", dest="svp_hvn_frac", type=float,
+                   help="SVP HVN threshold as a fraction of max row vol (0.70)")
+    p.add_argument("--svp-lvn-frac", dest="svp_lvn_frac", type=float,
+                   help="SVP LVN threshold as a fraction of mean row vol (0.30)")
+    p.add_argument("--svp-risk-pct", dest="svp_risk_pct", type=float,
+                   help="SVP risk per trade as %% of balance (default 5.0)")
+    p.add_argument("--svp-min-bars", dest="svp_min_bars", type=int,
+                   help="SVP session bars before any entry (default 20)")
+    p.add_argument("--svp-buffer-ticks", dest="svp_buffer_ticks", type=float,
+                   help="SVP structural-stop buffer beyond the shelf, in ticks "
+                        "(default 50 = $0.50 for gold)")
+    p.add_argument("--svp-enable-lvn", dest="svp_enable_lvn", action="store_true",
+                   help="SVP: enable LVN break entries (off by default)")
+    p.add_argument("--svp-enable-absorption", dest="svp_enable_absorption",
+                   action="store_true",
+                   help="SVP: enable the directionless absorption proxy (off; "
+                        "NOT true delta — tick volume is undirected)")
+    p.add_argument("--svp-tpo-fallback", dest="svp_tpo_fallback",
+                   action="store_true",
+                   help="SVP: build the profile from time-at-price (TPO) when a "
+                        "bar has no tick volume (for volume-less feeds; live "
+                        "mt5feed has tick volume, so leave off)")
+
+
+def _add_smc_flags(p) -> None:
+    """--smc-* tuning flags (shared by live and replay)."""
+    p.add_argument("--smc-min-confluences", dest="smc_min_confluences", type=int,
+                   help="SMC confluence checks required to fire, 1..6 (default 3; "
+                        "htf_poi is always mandatory)")
+    p.add_argument("--smc-risk-pct", dest="smc_risk_pct", type=float,
+                   help="SMC risk per trade as %% of balance, (0, 10] (default 2.0)")
+    p.add_argument("--smc-disp-atr-mult", dest="smc_disp_atr_mult", type=float,
+                   help="SMC displacement bar range vs ATR minimum (default 1.2)")
+    p.add_argument("--smc-poc-tol", dest="smc_poc_tol", type=float,
+                   help="SMC price distance counted as 'at POC' (default 2.0)")
+    p.add_argument("--smc-stop-max-dist", dest="smc_stop_max_dist", type=float,
+                   help="SMC reject entries with structural stops wider than this "
+                        "(default 15.0)")
+    p.add_argument("--smc-max-trades-per-day", dest="smc_max_trades_per_day",
+                   type=int, help="SMC max entries per UTC day (default 2)")
+    p.add_argument("--smc-trail-mode", dest="smc_trail_mode",
+                   choices=("swing", "atr"),
+                   help="SMC ladder trail: swing (default) or atr")
+    p.add_argument("--smc-final-tp-r", dest="smc_final_tp_r", type=float,
+                   help="SMC ladder final take-profit in R; 0 = runner trails out "
+                        "(default 10.0)")
+
+
 def _add_common(p) -> None:
     p.add_argument("--config", help="JSON config file (CLI flags override)")
     p.add_argument("--range-min", dest="range_min", type=int)
@@ -603,6 +927,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     rp = sub.add_parser("replay", help="replay a CSV of 1m candles (backtest)")
     rp.add_argument("candles", help="CSV: ts,open,high,low,close[,volume]")
+    rp.add_argument("--strategy", choices=("orb", "svp", "smc"), default="orb",
+                    help="orb (default), svp or smc (backtest that strategy's "
+                         "engine; --svp-*/--smc-* flags tune it)")
+    _add_svp_flags(rp)
+    _add_smc_flags(rp)
     _add_common(rp)
     rp.set_defaults(func=cmd_replay)
 
@@ -634,38 +963,14 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--entry", choices=("market", "limit"), default="market",
                     help="limit: enter at the liquidity level (old stop spot) "
                          "with one pre-placed add-on toward the SL")
-    lp.add_argument("--strategy", choices=("orb", "svp"), default="orb",
-                    help="orb (default, opening-range breakout) or svp (Session "
+    lp.add_argument("--strategy", choices=("orb", "svp", "smc"), default="orb",
+                    help="orb (default, opening-range breakout), svp (Session "
                          "Volume Profile Edge Rotation; market entry, structural "
-                         "stops, dynamic 5%% sizing, magic 20260620)")
-    lp.add_argument("--svp-ticks-per-row", dest="svp_ticks_per_row", type=int,
-                    help="SVP profile row width in ticks (default 10)")
-    lp.add_argument("--svp-tick-size", dest="svp_tick_size", type=float,
-                    help="SVP tick size (default 0.01 = gold)")
-    lp.add_argument("--svp-va-pct", dest="svp_va_pct", type=float,
-                    help="SVP value-area fraction (default 0.70)")
-    lp.add_argument("--svp-hvn-frac", dest="svp_hvn_frac", type=float,
-                    help="SVP HVN threshold as a fraction of max row vol (0.70)")
-    lp.add_argument("--svp-lvn-frac", dest="svp_lvn_frac", type=float,
-                    help="SVP LVN threshold as a fraction of mean row vol (0.30)")
-    lp.add_argument("--svp-risk-pct", dest="svp_risk_pct", type=float,
-                    help="SVP risk per trade as %% of balance (default 5.0)")
-    lp.add_argument("--svp-min-bars", dest="svp_min_bars", type=int,
-                    help="SVP session bars before any entry (default 20)")
-    lp.add_argument("--svp-buffer-ticks", dest="svp_buffer_ticks", type=float,
-                    help="SVP structural-stop buffer beyond the shelf, in ticks "
-                         "(default 50 = $0.50 for gold)")
-    lp.add_argument("--svp-enable-lvn", dest="svp_enable_lvn", action="store_true",
-                    help="SVP: enable LVN break entries (off by default)")
-    lp.add_argument("--svp-enable-absorption", dest="svp_enable_absorption",
-                    action="store_true",
-                    help="SVP: enable the directionless absorption proxy (off; "
-                         "NOT true delta — tick volume is undirected)")
-    lp.add_argument("--svp-tpo-fallback", dest="svp_tpo_fallback",
-                    action="store_true",
-                    help="SVP: build the profile from time-at-price (TPO) when a "
-                         "bar has no tick volume (for volume-less feeds; live "
-                         "mt5feed has tick volume, so leave off)")
+                         "stops, dynamic 5%% sizing, magic 20260620), or smc (Smart "
+                         "Money Concepts A+ MTF; market entry, structural stops, "
+                         "dynamic sizing, ladder exits, magic 20260621)")
+    _add_svp_flags(lp)
+    _add_smc_flags(lp)
     lp.add_argument("--max-daily-loss", dest="max_daily_loss", type=float,
                     help="halt trading for the rest of the UTC day after losing "
                          "this many account-currency units (e.g. 110)")
@@ -685,6 +990,52 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--macro-conf-min", dest="macro_conf_min", type=float,
                     default=0.6,
                     help="min macro confidence to act on a bias conflict / risk-off")
+    # ---- Part 2 execution layer (all default OFF; see docs/copytrade_schema.md)
+    lp.add_argument("--max-spread", dest="max_spread", type=float,
+                    help="skip entries while the live spread (ask-bid) exceeds "
+                         "this, in price units (gold: 0.4 = 40 cents)")
+    lp.add_argument("--killzones", dest="killzones",
+                    help="UTC entry windows 'HH:MM-HH:MM[,HH:MM-HH:MM]' "
+                         "(e.g. 12:00-16:00 = London/NY overlap); entries "
+                         "outside are skipped. Fixed UTC - no DST tracking")
+    lp.add_argument("--resolve-symbol", dest="resolve_symbol",
+                    action="store_true",
+                    help="resolve --symbol to the broker's actual variant "
+                         "(XAUUSD -> XAUUSD.ecn/.pro/m/...) before connecting")
+    lp.add_argument("--retry-policy", dest="retry_policy",
+                    choices=("off", "on"), default="off",
+                    help="retcode-policy resend loop (fresh-price requotes, "
+                         "exponential backoff, double-fill recovery); "
+                         "off (default) = single-send")
+    lp.add_argument("--max-retries", dest="max_retries", type=int, default=3,
+                    help="retry budget when --retry-policy on (default 3)")
+    lp.add_argument("--max-slippage", dest="max_slippage", type=float,
+                    help="slippage tolerance in price units: sets the order "
+                         "deviation (server-side cap) and flags post-fill "
+                         "breaches against the ORIGINAL signal levels")
+    lp.add_argument("--slippage-policy", dest="slippage_policy",
+                    choices=("keep", "close"), default="keep",
+                    help="on a post-fill slippage/R:R breach: keep the "
+                         "position and alert (default) or close it immediately")
+    lp.add_argument("--rr-floor", dest="rr_floor", type=float,
+                    help="minimum achieved R:R at the actual fill price; "
+                         "below it the slippage policy fires")
+    lp.add_argument("--risk-pct", dest="risk_pct", type=float,
+                    help="ORB equity sizing: lot so the loss at the signal "
+                         "stop is this %% of balance (default: fixed --qty)")
+    lp.add_argument("--max-consec-losses", dest="max_consec_losses", type=int,
+                    default=0,
+                    help="skip new entries after this many consecutive losing "
+                         "closes in a UTC day (0 = off)")
+    lp.add_argument("--trade-log", dest="trade_log",
+                    help="append schema-v1 trade events to this JSONL file")
+    lp.add_argument("--broadcast", dest="broadcast",
+                    help="POST trade events to this leader-node URL "
+                         "(secret from env COPYTRADE_SECRET, never a flag)")
+    lp.add_argument("--broadcast-spool", dest="broadcast_spool",
+                    default="broadcast_spool.jsonl",
+                    help="offline spool for unsent broadcasts (default "
+                         "broadcast_spool.jsonl)")
     _add_common(lp)
     lp.set_defaults(func=cmd_live)
 

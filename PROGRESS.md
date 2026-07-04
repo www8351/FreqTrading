@@ -1,5 +1,107 @@
 # PROGRESS
 
+## 2026-07-04 (latest) — Part 2: execution layer + copy-trade broadcast, TDD build
+- Ran the approved plan (`~/.claude/plans/part-2-part-1-fizzy-thunder.md`) as a background workflow:
+  8 parallel/chained build tasks (schema doc, tradeevents, broker event emission, retcodes+retry,
+  execguard, symbols, broadcast, leader sidecar) then CLI wiring then adversarial review.
+- **Session-limit interruption:** the workflow's CLI-wiring task and the review task were cut off
+  mid-run by a token session cap. On resume, checked actual state instead of assuming failure —
+  the build tasks (T1-T8) had landed cleanly, and CLI wiring had ALSO landed (`orb/cli.py` modified,
+  `tests/test_cli_part2.py` present) before the cutoff; only 2 of ~30 new tests were failing.
+- **Fix 1 — `UnboundLocalError: dataclasses`:** a pre-existing function-local `import dataclasses`
+  at the tail of `on_signal` (serving the macro qty-scale branch) makes `dataclasses` a local name
+  for the ENTIRE function per Python scoping rules — so the new ORB risk-pct sizing block's
+  `dataclasses.replace` call, which now runs earlier in the same function, hit an UnboundLocalError.
+  Removed the redundant local import (module-level `import dataclasses` at the top already covers
+  it); macro branch behavior unchanged.
+- **Fix 2 — broadcaster never closed:** Task 11's `bcaster.close()` wiring into `cmd_live`'s
+  `finally` block was the part cut off by the session limit. Added it (drains the spool before
+  `broker.shutdown()`) + a shutdown log line for non-empty `retcode_counts`.
+- **Verify:** `python -m pytest -q` → 588 passed, 0 failures (445 pre-existing + 143 new Part 2).
+- **Also resolved:** committed git merge-conflict markers in DECISIONS.md/STATUS.md/PROGRESS.md
+  (found while cross-checking the plan against these files, per owner instruction) — merged both
+  sides chronologically, no content lost, annotated the `orb/brokerstate.py` claim as an unlanded
+  stash (file absent from the working tree; the 273-test figure belongs to that stash).
+- **Next:** the adversarial review agent was also cut off by the session limit — re-run it before
+  calling this done. Owner review/commit after. No live bot touched.
+
+## 2026-07-04 (later) — README redesign: bilingual EN/HE operating guide + roadmap diagrams
+- Owner request (Hebrew): operating instructions in Hebrew + English, and a nicer README with a
+  roadmap and visualization of the install/run flow.
+- Rewrote `README.md`: TOC anchors; two Mermaid diagrams (6-stage install→verify→demo→monitor→
+  live-decision roadmap; strategy-chooser orb/svp/smc); a 6-step bilingual **Operating Guide**
+  table (install, configure, verify-before-real-money, demo run, monitor via `live_report.py`,
+  go-live gate) plus an optional MQL5 EA compile/attach walkthrough — English left, Hebrew (RTL)
+  right, identical shared commands. Added an SMC honest-verdict collapsible (parity with SVP's)
+  and a US100-ORB positive-edge collapsible so every strategy verdict is visible from the README.
+  Corrected the stale pytest badge (226→445).
+- Docs-only; no code changed, no tests affected.
+
+## 2026-07-04 — SMC A+ system built end-to-end (orb/smc/ + MQL5 EA + analytics), ARMED, honest verdict recorded
+- **Context:** goal `/alter review` — owner wants a precision multi-TF SMC/ICT XAUUSD system feeding his
+  copy-trader. Locked (AskUserQuestion): Python module + MQL5 EA; ship-armed; 2% risk; add a pro-metrics
+  suite that also scores the existing live bots.
+- **Built (TDD, additive, off by default):**
+  - `orb/smc/`: `mtf.py` (TimeframeAggregator 1m→M15/H4/D1), `structure.py` (StructureTracker
+    fractal BOS/CHOCH), `orderblocks.py` (OrderBlockTracker), `exits.py` (LadderExitManager —
+    Babysitter drop-in, multi-level partials 5R/7R + 10R runner, BE+swing/ATR trail at +2R, tighten-only),
+    `config.py` (SmcConfig), `strategy.py` (SmcEngine: H4 bias/D1 veto, ≥3 confluences with htf_poi
+    mandatory, structural SL, dormant when no bias). Magic 20260621.
+  - `orb/analytics.py` (pure metrics) + `scripts/live_report.py` (MT5 deals-by-magic report).
+  - `mql5/SmcXau_EA.mq5` (self-contained EA; recompute-per-M15-bar; deal-history ladder state).
+  - Wiring: `--strategy smc` in `orb/cli.py` (engine/broker/sizing/ladder + cmd_replay dispatch) and
+    `scripts/sim_realistic.py` `run_smc()`.
+- **Method:** parallel subagent build (foundation 6 modules → SmcEngine → integration trio), each TDD,
+  plus an adversarial verify workflow (4 read-only agents) on the plan's integration claims before coding.
+- **Re-arm fix:** `run_smc` calls `engine.force_flat` at loop top once the sim position fully closes.
+  SMC holds multi-day (unlike SVP's session-exit), so the engine must stay IN position across sessions
+  until actually flat; without this it locked after 1 trade (91/73 trades after the fix).
+- **Backtest (honest, real gold cost):** 0303-0612 PF **0.46** (n73: 6 winners avg +$73.6 / 67 losers
+  avg −$14.3), 0321-0612 PF **0.15**. Asymmetry is real (winners ~5R via the ladder, losers capped;
+  4-24h holds fire) but gold yields too few winners to beat cost — reconfirms D-016…D-020. Shipped armed
+  per owner choice. See D-027.
+- **Verify:** `python -m pytest -q` = **445 passed**. ORB/SVP paths unchanged.
+
+## 2026-07-04 — SMC strategy test suite: 4 failures fixed (all fixture/helper bugs, engine untouched)
+- **Context:** `orb/smc/strategy.py` (SmcEngine) + `tests/test_smc_strategy.py` built TDD; 11/15 passing.
+- **Root causes (all in the TEST, NOT the engine):**
+  1. `test_only_two_confluences_no_entry`: close==POC==equilibrium made `premium_discount` fire too,
+     giving align+pd+poi=3. Fixed fixture: parked close at `poc+1.0` (pd false, poi still within tol).
+  2/3. `test_stop_too_wide_skips`, `test_max_trades_per_day_blocks_third`: the `_armed_long_engine`
+     helper left a LEGITIMATE warmup ENTRY open (H4 BOS block fires disp+pd+poi via h4_ob the instant
+     bias turns LONG — correct engine behaviour). Helper now resets `_position/_state/_traded_today`
+     after warmup so tests start truly flat+armed.
+  4. `test_end_to_end_entry_from_1m_stream`: (a) `b2` loop built an invalid candle (`lo=sl-2.0` could
+     exceed `hi` when `disp_open<sl`) → CandleError; fixed by making hi/lo a true envelope of {o,c,
+     sweep_target}. (b) same stale warmup position blocked the sculpted entry; cleared it after the
+     bias assertion. Test now fires a REAL stream entry `conf=sweep+align+poi 3/6 poi=poc`.
+- **Verified:** `tests/test_smc_strategy.py` 15/15; full suite `python -m pytest -q` 422 passed.
+- **Engine code: unchanged.** No SmcEngine bug found; the warmup entry is correct A+ behaviour.
+
+## 2026-06-27 — Public packaging + latency optimizations (no behaviour change)
+- **Goal:** package the repo as a public GitHub showcase (AI/DevOps positioning) + shave execution
+  latency, without altering trading logic.
+- **Wrote:** new public `README.md` (Architecture / Low-Latency Optimizations / Setup / Usage / CI);
+  `requirements.txt` (only `MetaTrader5`, Windows env-marked) + `requirements-dev.txt`;
+  `.github/workflows/ci.yml` (py3.11/3.12: flake8 critical-blocking + full-advisory, black --check
+  advisory, pytest); `.flake8`; `[tool.black]` in `pyproject.toml`.
+- **Latency opt 1 — adaptive polling** (`orb/feeds/mt5feed.py`): replaced the fixed `poll_sec` sleep
+  with a boundary-timed sleep (`min_poll` default 0.1s) + exponential backoff on no-rates. Cuts
+  worst-case bar-detection latency from ~2s to ~`min_poll`. Injectable `now_fn`/`mt5` kept.
+- **Latency opt 2 — broker-state cache** (`orb/brokerstate.py`, wired in `orb/cli.py`): a background
+  asyncio task refreshes balance/positions via `run_in_executor`, so `on_bar` reads a cached snapshot
+  instead of making 2 blocking MT5 IPC calls on the candle path. Writes stay synchronous (no order race).
+  **(Correction, 2026-07-04: never landed — dropped in an abandoned `git stash`; file absent from the
+  working tree. The 273-passing figure below is from that stash, not the current suite.)**
+- **Latency opt 3 — parallel position routing:** documented as a design note in the README (not applied;
+  mutates live orders, needs a terminal to validate).
+- **What worked:** `pytest -q` → 273 passing (added 4 brokerstate + 2 adaptive-feed tests). flake8
+  critical subset = 0 across the repo; new code is flake8- and black-clean. `python -m orb --help`
+  and imports OK.
+- **Snag (env):** the working tree was reset from `main` to `feat/us100-verify-gold-orb-grid`
+  mid-task, discarding the first pass of these changes; all files were re-applied on the new branch.
+- **Decision logged:** D-026 (strictly-accurate public framing — no ML/profit claims).
+
 ## 2026-06-23 — LIVE: US100-ONLY 24h watch (XAUUSD parked)
 - Owner wants next 24h on US100 alone. Removed XAUUSD.ecn from `$ENABLED` in `scripts/bots.ps1`
   (kept as DISABLED comment for one-line re-enable; no-edge per D-020). US100 config unchanged.

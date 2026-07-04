@@ -1,6 +1,112 @@
 # STATUS
 
-_Last updated: 2026-06-23_
+## 2026-07-04 (latest) — Part 2 execution/broadcast layer built, flag-gated (588/588 suite)
+- Delivered owner spec §4-6 (companion to Part 1/D-027): production execution layer + copy-trade
+  broadcast. **All off by default; ORB/SVP/SMC live paths byte-unchanged.** See D-028.
+- **New:** `orb/tradeevents.py` (event model + JSONL log + fan-out hub), `orb/broker/retcodes.py`
+  (retcode policy table, exponential-backoff retry, double-fill guard), `orb/execguard.py` (spread
+  gate, killzone session gate, post-fill R:R-degradation check), `orb/symbols.py` (JustMarkets
+  symbol resolver: XAUUSD → .ecn/.pro/m/...), `orb/broadcast.py` (non-blocking HMAC-signed publisher
+  with disk spool), `leader/` sidecar (stdlib REST ingest + optional ZeroMQ PUB — no live
+  copy-trading backend existed on this machine, so this ships one), `docs/copytrade_schema.md`
+  (shared JSON contract for Part 1's `mql5/SmcXau_EA.mq5`).
+- **Modified:** `orb/broker/mt5.py` (event hooks, `current_spread`, `deal_profit`, injectable
+  `RetryPolicy`), `orb/cli.py` (13 new live-mode flags, all default off — `--max-spread`,
+  `--killzones`, `--resolve-symbol`, `--retry-policy`, `--max-slippage`/`--slippage-policy`,
+  `--rr-floor`, `--risk-pct`, `--max-consec-losses`, `--trade-log`, `--broadcast`).
+- **Fixed a pre-existing bug found along the way:** a function-local `import dataclasses` inside
+  `on_signal` shadowed the module import for the whole function (Python scoping), breaking the new
+  ORB risk-pct sizing call. Removed the redundant local import — macro qty-scale branch unaffected.
+- **Verify:** `python -m pytest -q` → **588 passed** (445 baseline + 143 new). Spy-broker test pins
+  byte-identical `on_signal`→broker call sequence when no new flags are passed.
+- **Also fixed this session:** committed git merge-conflict markers in DECISIONS.md/STATUS.md/
+  PROGRESS.md (both sides' content merged chronologically, nothing lost); annotated 2 entries
+  (`orb/brokerstate.py` BrokerStateCache, the 273-test figure) as describing a `git stash` that was
+  never landed — the file does not exist in the working tree.
+- **Next:** re-run the adversarial code review (previous attempt hit a session token limit before
+  completing) — focus areas: live-safety when flags off, broadcast never blocking the trading loop,
+  double-fill recovery correctness, R:R math both directions, HMAC/secret handling. Then owner
+  review/commit. `scripts/bots.ps1` untouched throughout — enabling any Part 2 feature live is a
+  separate owner action.
+
+## 2026-07-04 (later) — README redesigned: bilingual (EN/HE) operating guide + visual roadmap
+- Owner asked (in Hebrew) for bilingual EN/HE operating instructions and a nicer README with a
+  roadmap + install/run visualization. Docs-only change, no code touched.
+- `README.md` rewritten: added a TOC, two mermaid roadmap diagrams (install→verify→demo→monitor→
+  live decision gate; and a `--strategy` chooser orb/svp/smc), and a full bilingual **Operating
+  Guide** (6 steps + optional MQL5 EA compile walkthrough) — English and Hebrew (RTL) side by side
+  per step, same commands under both. Added a matching "SMC research verdict" collapsible (parity
+  with the existing SVP one) and a "US100 ORB — the one positive-edge result" collapsible so the
+  honest verdicts are all visible in one place. pytest badge corrected 226→445.
+- **Next:** owner review of the new README; no further action required.
+
+## 2026-07-04 — SMC A+ system COMPLETE: orb/smc/ + MQL5 EA + pro-metrics (445/445 suite, ARMED)
+- Delivered the owner's multi-timeframe SMC/ICT XAUUSD system end-to-end (goal `/alter review`).
+  New standalone `orb/smc/` package (magic **20260621**), a self-contained MQL5 EA, and a pro-metrics
+  analytics suite. **445 tests green**; ORB/SVP paths byte-unchanged; off by default (opt-in `--strategy smc`).
+- **`orb/smc/`** (all TDD, stdlib, O(1)/bar): `mtf.py` TimeframeAggregator (1m→M15/H4/D1, UTC-aligned);
+  `structure.py` StructureTracker (fractal BOS/CHOCH, close-based breaks); `orderblocks.py`
+  OrderBlockTracker (displacement OB, promote-on-BOS, mitigate/expire); `exits.py` LadderExitManager
+  (Babysitter-drop-in: partials 5R/7R + 10R runner, BE+swing/ATR trail armed only at +2R, tighten-only);
+  `config.py` SmcConfig; `strategy.py` SmcEngine — H4 bias / D1 veto, ≥3 confluences (htf_poi MANDATORY:
+  htf_poi/ltf_sweep/displacement/cisd/alignment/premium_discount), structural SL, 2% sizing, dormant
+  when no bias.
+- **`orb/analytics.py`** (pure) + **`scripts/live_report.py`** (MT5 deals-by-magic): PF, win rate,
+  day-win%, trade-win%, avg win/loss, maxDD $/%, recovery factor, consistency (largest-day share),
+  daily net+cum table, by-hour, by-duration. Scores backtests AND the live bots (20260610/11/20/21).
+- **`mql5/SmcXau_EA.mq5`**: single-file EA (only stock `<Trade/Trade.mqh>`), recompute-per-M15-bar
+  from closed bars (deterministic restart recovery for the copy-trade master); 2% sizing, layered
+  exits, deal-history-derived ladder state, one-position/daily-halt guards, no averaging/grid.
+- **run_smc re-arm fix (important):** the sim now calls `engine.force_flat` at the top of the loop
+  when the sim's real position has fully closed — SMC is a **multi-day hold** (unlike SVP which
+  session-exits), so the engine stays IN position across sessions until the trade is actually flat.
+  Without this the engine locked after 1 trade. Live cli already syncs via force_flat when flat.
+- **Honest backtest verdict (unchanged from D-016…D-020):** at real gold cost the edge is negative —
+  0303-0612 window PF **0.46** (73 trades, 6 winners avg +$73.6 / 67 losers avg −$14.3), 0321-0612
+  PF **0.15**. The exit ladder works exactly as designed (asymmetric: winners ~5R, losers capped at
+  BE/small; multi-day holds fire), but gold doesn't yield enough winners to beat cost. Owner chose
+  **ship-armed** knowing this. See D-027.
+- **Verify / run:** `python -m pytest -q` (445); `python scripts/sim_realistic.py data/xauusd_1m_*.csv
+  --strategy smc --spread 1.10 --start-balance 1000`; `python scripts/live_report.py --magic 20260611
+  --days 30`; armed demo: `python -m orb live --source orb.feeds.mt5feed:xauusd_live --broker mt5
+  --strategy smc --symbol XAUUSD.ecn --max-daily-loss 110`. EA: copy to `MQL5/Experts/`, F7, attach
+  XAUUSD.ecn M15 demo.
+- **Next:** owner runs the EA in MetaEditor/Strategy-Tester + feeds the demo signal to the copy-trader;
+  everything staged/uncommitted for owner review.
+
+## 2026-07-04 — SMC strategy tests all green (422/422 suite)
+- `orb/smc/` module (SmcEngine A+ entry state machine) + its test files are present (untracked).
+- Fixed the 4 failing `tests/test_smc_strategy.py` cases — ALL were test fixture/helper bugs, engine
+  left unchanged. `tests/test_smc_strategy.py` 15/15; full `python -m pytest -q` = 422 passed.
+- Key finding: `_armed_long_engine` / the end-to-end fixture must reset the LEGITIMATE warmup entry
+  (H4 BOS fires an A+ setup the instant bias turns LONG) to start flat+armed. See PROGRESS 2026-07-04.
+- Next: `orb/smc/` is new/untracked — decide whether to commit; no engine changes pending.
+
+_Last updated: 2026-07-04_
+
+## 2026-06-27 — Public packaging: README + requirements + CI + latency opts
+- Owner positioning the GitHub profile as AI & DevOps Architect (low-latency execution engines).
+  Packaged the repo for public view WITHOUT changing trading behaviour.
+- **README.md** rewritten as a public engineering showcase (Architecture, Low-Latency
+  Optimizations, Setup, Usage, CI). Strictly accurate: no ML/MLOps claims (there is none),
+  no profitability claims; honest verdicts stay in DECISIONS/STRATEGY. See D-026.
+- **requirements.txt** (`MetaTrader5` Windows env-marked — only runtime dep) + **requirements-dev.txt**
+  (pytest, pytest-asyncio, flake8, black). **`.github/workflows/ci.yml`**: py3.11/3.12 matrix,
+  flake8 (critical blocking / full advisory) + black --check (advisory) + pytest. `.flake8` +
+  `[tool.black]` added.
+- **Latency optimizations (2 implemented, 1 documented):**
+  - Adaptive boundary-timed polling in `orb/feeds/mt5feed.py` (`min_poll` param; sleeps to the bar
+    close, tightens near boundary, exponential backoff on no-rates). Worst-case bar detection ~2s→~0.1s.
+  - `orb/brokerstate.py` `BrokerStateCache`: background `run_in_executor` refresh of balance/positions;
+    `on_bar` reads the snapshot (was 2 blocking IPC calls/bar). Writes left synchronous.
+    **(Correction, 2026-07-04: this file does not exist in the working tree — the change was staged
+    in a since-dropped `git stash` and never landed. The 273-test figure below reflects that stash,
+    not code on disk. Treat as historical record of intent, not current state.)**
+  - ThreadPoolExecutor parallel position routing — documented in README only (touches live orders).
+- **Verify:** `pytest -q` → **273 passing** (+6 new: 4 brokerstate, 2 feed). flake8 critical = 0;
+  new code flake8/black clean. No live trading code path semantics changed.
+- **Note:** session began on `main` but the working tree was switched to
+  `feat/us100-verify-gold-orb-grid` mid-task; all changes above are committed to that branch's tree.
 
 ## 2026-06-23 — LIVE: US100-ONLY (24h owner watch); XAUUSD parked
 - Owner: "next 24h run only US100, let's see how it runs." Removed XAUUSD.ecn from `$ENABLED` in

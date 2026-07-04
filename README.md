@@ -1,315 +1,539 @@
-# ORB — Low-Latency Execution Engine for MetaTrader 5
+<div align="center">
 
-A real-time, **event-driven trading execution engine** for MetaTrader 5. A pure,
-synchronous strategy core is driven by an async candle feed sourced from the same
-local terminal that places the orders — keeping the path from *price* to *order*
-as short as the platform allows.
+# 📈 FreqTrading
 
-![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![runtime deps](https://img.shields.io/badge/runtime%20deps-stdlib%20only-success)
-![tests](https://img.shields.io/badge/tests-273%20passing-success)
-![CI](https://img.shields.io/badge/CI-flake8%20%7C%20black%20%7C%20pytest-informational)
-![platform](https://img.shields.io/badge/live-Windows%20%2B%20MT5-lightgrey)
+### `XAU/USD · 1-minute` · `ORB + momentum` · `live MT5 execution`
 
-> **Scope & honesty.** This is an *engineering* showcase: clean architecture,
-> deterministic latency, full test coverage, and CI/ops automation. It is a
-> rule-based system — **there is no machine learning** here — and it makes **no
-> profitability claims**. The repository's own research notes
-> (`DECISIONS.md`, `STRATEGY.md`) record, candidly, which strategies survive
-> realistic trading costs and which do not. Trading is for demo accounts by
-> default; a hard guard refuses live accounts unless explicitly overridden.
+**Automated gold-scalping bot: opening-range breakout with momentum validation, risk guards, and a live MetaTrader 5 execution layer.**
+*בוט סקאלפינג אוטומטי לזהב: פריצת טווח פתיחה עם אימות מומנטום, שומרי סיכון ושכבת הרצה חיה על MetaTrader 5.*
 
----
+<br/>
 
-## Why it matters
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![asyncio](https://img.shields.io/badge/asyncio-stdlib%20core-1f6feb)
+![MetaTrader5](https://img.shields.io/badge/MetaTrader5-broker%20adapter-0A7CFF?logo=metatrader&logoColor=white)
+![MQL5](https://img.shields.io/badge/MQL5-EA%20port-673AB7)
+![pytest](https://img.shields.io/badge/pytest-445%20passing-0A9EDC?logo=pytest&logoColor=white)
+<br/>
+![Last commit](https://img.shields.io/github/last-commit/www8351/FreqTrading?color=informational)
+![Repo size](https://img.shields.io/github/repo-size/www8351/FreqTrading)
+![Stars](https://img.shields.io/github/stars/www8351/FreqTrading?style=social)
 
-In discretionary-to-automated trading, the bottleneck that quietly erodes edge is
-**execution latency and operational fragility**, not strategy cleverness. This
-project is built around that thesis:
-
-- **Deterministic, low-latency hot path** — O(1) per bar, no allocation churn, no
-  blocking I/O on the candle-processing path.
-- **Operational resilience** — auto-reconnect on terminal restart, daily-loss
-  circuit breaker, momentum-spike order cancellation, fail-safe macro guard,
-  demo-only safety latch.
-- **Production hygiene** — stdlib-only runtime (one optional Windows dependency),
-  273 passing tests, dependency-injected broker/feed/clock for full offline
-  testability, and CI (lint + format + test) on every push.
+</div>
 
 ---
 
-## Architecture overview
+## 📑 Contents · תוכן עניינים
 
-The system is a one-directional pipeline of small, single-responsibility units.
-The **engine is pure and synchronous** (no I/O, no global state — every collaborator
-is injected), so it is trivially unit-testable and contributes effectively zero
-latency. Everything time- or network-bound lives at the edges.
-
-```
-   MetaTrader 5 terminal (local)
-            │  closed M1 bars (zero feed hop — same terminal that trades)
-            ▼
-   ┌─────────────────────┐
-   │ feeds/mt5feed.py     │  async generator, adaptive polling, auto-reconnect,
-   │   stream_candles()   │  broker→UTC offset auto-lock
-   └─────────┬───────────┘
-             │ Candle (immutable dataclass)
-             ▼
-   ┌─────────────────────┐
-   │ stream.py            │  async driver; runs the sync engine inline
-   │   CandleStream.run() │  (engine is O(1)/bar — no executor offload needed)
-   └─────────┬───────────┘
-             │ on_candle()                 ┌──────────────────────────────┐
-             ▼                             │ brokerstate.py               │
-   ┌─────────────────────┐                │  BrokerStateCache (async      │
-   │ engine.py            │  Signal        │  background refresh of        │
-   │   OrbEngine /        │───────────────▶│  balance/positions in a       │
-   │   svp/SvpEngine      │                │  thread → off the hot path)   │
-   │  IDLE→RANGE→BREAKOUT │                └──────────────┬───────────────┘
-   └─────────┬───────────┘                               │ cached snapshot
-             │                                            ▼
-             ▼  per-signal / per-bar guards     ┌───────────────────────┐
-   ┌────────────────────────────────────┐      │ broker/mt5.py          │
-   │ riskguard  (daily-loss, spike)      │      │   Mt5Broker            │
-   │ macroguard (veto / scale / risk-off)│─────▶│  market / limit entry  │
-   │ trueopen / quarters (entry filters) │      │  SL/TP, demo-only guard│
-   │ babysitter (partial TP + trail)     │      └───────────────────────┘
-   └────────────────────────────────────┘
-```
-
-**Components**
-
-| Module | Responsibility |
-| --- | --- |
-| `orb/engine.py` | Pure sync state machine `IDLE → RANGE_DEFINED → BREAKOUT → EXIT` (ROC momentum gate, ATR ratchet trail, partial TP, session rearm). |
-| `orb/indicators.py` | Incremental Wilder ATR, ROC, Volume SMA — O(1)/bar, fixed memory (`deque`). |
-| `orb/stream.py` | Async wrapper driving the sync engine from any async candle source. |
-| `orb/feeds/mt5feed.py` | MT5-native candle feed (near-zero lag, adaptive polling, auto-reconnect). |
-| `orb/feeds/twelvedata.py` | Cloud REST feed for historical fetch / fallback. |
-| `orb/broker/mt5.py` | MT5 execution adapter — market or limit-mode entries, server-side SL/TP, demo-only guard. |
-| `orb/brokerstate.py` | Background cache of balance/positions; keeps blocking IPC off the candle path. |
-| `orb/babysitter.py` | Per-ticket exit manager: take partial off at +R, chase the runner's stop. |
-| `orb/riskguard.py` | Daily-loss circuit breaker + momentum-spike pending-order cancel. |
-| `orb/macroguard.py` | Pure consumer of `macro_state.json`: entry veto / qty scale / risk-off. |
-| `orb/svp/` | Standalone Session-Volume-Profile research strategy (off by default). |
-| `macro/` | **Sidecar** process: fetches calendar/macro data, writes `macro_state.json`. Decoupled from the trader via a single file. |
-
-The **macro layer is a separate process**. It never shares memory with the trading
-loop; the two communicate only through an atomically-written `macro_state.json`.
-If the sidecar dies, the trader keeps running (fail-safe: trade as if no macro
-input). This is a deliberate availability boundary — a fault in fundamental-data
-collection can never stall or crash order execution.
+[What is this?](#-what-is-this--מה-זה) ·
+[Roadmap](#️-roadmap--מפת-דרכים) ·
+[Operating Guide · מדריך תפעול](#️-operating-guide--מדריך-תפעול) ·
+[Core modules](#-core-modules-orb) ·
+[Architecture](#-architecture) ·
+[Strategy verdicts](#-honest-strategy-verdicts--מסקנות-כנות) ·
+[Lifecycle files](#-project-lifecycle-files)
 
 ---
 
-## Low-Latency Optimizations
+## 🌍 What is this? · מה זה?
 
-Latency here means the wall-clock from *a bar closing* to *an order being sent*.
-The design keeps that path short and jitter-free.
+<table>
+<tr>
+<td width="50%" valign="top">
 
-### Already in the architecture
+### 🇬🇧 English
 
-- **Zero feed hop.** Candles come from `copy_rates_from_pos` on the *same local
-  terminal* that executes orders (`orb/feeds/mt5feed.py`) — no external REST
-  provider, no extra network round-trip, no third-party clock skew.
-- **Incremental O(1) indicators.** ATR/ROC/Volume SMA update in constant time from
-  fixed-size `deque`s (`orb/indicators.py`); the engine never recomputes over
-  history, so per-bar cost is flat regardless of how long the bot has run.
-- **Pure synchronous engine, bounded memory.** `OrbEngine.on_candle` does no I/O
-  and allocates nothing per tick beyond a small immutable `Signal`. It runs inline
-  on the event loop (`orb/stream.py`) precisely because it is too cheap to be
-  worth offloading.
+An **automated trading system for XAU/USD on the 1-minute chart**. It trades an
+**Opening Range Breakout (ORB)** strategy gated by ROC momentum, with an ATR
+ratchet trail and a fixed 20–40 pip stop.
 
-### Implemented in this iteration
+The core engine is a **pure, synchronous state machine** (`IDLE → RANGE_DEFINED →
+BREAKOUT → EXIT`) wrapped by an async live layer. Orders route to **MetaTrader 5**
+in market or **limit** mode (liquidity-level entry + one addon), guarded **demo-only**
+unless `--live` is passed.
 
-**1. Adaptive, boundary-timed polling** — `orb/feeds/mt5feed.py`
+A separate **macro sidecar** feeds an optional entry veto / risk-off layer. Two
+**standalone research strategies** ship alongside ORB — **SVP** (Session Volume
+Profile) and **SMC** (multi-timeframe Smart Money Concepts) — both honestly
+documented as *net-negative under realistic gold costs* (see verdicts below). A
+self-contained **MQL5 EA** ports the SMC engine for MT5 copy-trading.
 
-The feed previously slept a fixed `poll_sec` (2 s) between polls, so a freshly
-closed bar could sit undetected for up to a full interval. It now *times the next
-poll to the forming bar's close*: it relaxes mid-bar and tightens to `min_poll`
-(default 0.1 s) around the minute boundary, cutting worst-case bar-detection
-latency from ~2 s to ~`min_poll`. Repeated empty polls back off exponentially
-(capped) so a restarting terminal is never hammered.
+</td>
+<td width="50%" valign="top">
 
-```python
-# before: always wait the full interval
-await asyncio.sleep(poll_sec)
+<div dir="rtl">
 
-# after: sleep until just before the bar closes, tighten at the boundary
-secs_into = (now_fn() + offset) - forming_open
-time_to_close = BAR_SECONDS - (secs_into % BAR_SECONDS)
-next_sleep = min(poll_sec, max(min_poll, time_to_close + 0.05))
-await asyncio.sleep(next_sleep)
-```
+### 🇮🇱 עברית
 
-**2. Off-path broker-state cache** — `orb/brokerstate.py` + `orb/cli.py`
+**מערכת מסחר אוטומטית ל-XAU/USD בגרף הדקה.** סוחרת אסטרטגיית **פריצת טווח פתיחה
+(ORB)** עם שער מומנטום ROC, טריילינג ATR וסטופ קבוע של 20–40 פיפס.
 
-Every bar, the live loop needs account balance and open positions for the
-daily-loss breaker and the exit babysitter. Both are **blocking MT5 IPC
-round-trips**; calling them inline stalls the very event loop that drives the
-feed. `BrokerStateCache` runs *one* background task that refreshes a snapshot on a
-short interval, executing the blocking reads in a worker thread
-(`loop.run_in_executor`) so they never block the loop. `on_bar` reads the cached
-snapshot — a lock-free attribute load — and falls back to a direct call only while
-the cache is cold. **Writes (`order_send`, `modify_sl`, `close`) stay synchronous
-and serialized**, so order mutation is never racy.
+הליבה היא **מכונת מצבים טהורה וסינכרונית** (`IDLE → RANGE_DEFINED → BREAKOUT →
+EXIT`) עטופה בשכבת ריצה אסינכרונית. הפקודות נשלחות ל-**MetaTrader 5** במצב שוק או
+**לימיט** (כניסה ברמת נזילות + תוספת אחת), עם הגנת **דמו בלבד** אלא אם מועבר `--live`.
 
-```python
-# background, off the event loop:
-bal = await loop.run_in_executor(None, broker.balance)
-pos = await loop.run_in_executor(None, broker.my_positions)
+**סיידקאר מאקרו** נפרד מזין שכבת וטו-כניסה / risk-off אופציונלית. שתי
+**אסטרטגיות מחקר עצמאיות** מגיעות לצד ה-ORB — **SVP** (פרופיל ווליום) ו-**SMC**
+(Smart Money Concepts רב-טווחי) — שתיהן מתועדות בכנות כ*שליליות-נטו תחת עלויות
+זהב ריאליות* (ראו מסקנות למטה). **EA ב-MQL5** עצמאי מפעיל את מנוע ה-SMC על MT5
+לצורך העתקת מסחר (copy-trading).
 
-# on the hot path — no IPC, just a cached read:
-if breaker.update(c.ts.date(), state.balance()):
-    ...
-for act in sitter.on_bar(state.positions(), c.close):
-    ...
-```
+</div>
 
-### Documented next step
-
-**3. Parallel position routing** — `orb/cli.py` (`on_bar`)
-
-When the babysitter emits several actions in one bar (e.g. a partial close plus
-stop chases across multiple tickets), they currently execute sequentially, each
-blocking on `order_send`. Because per-ticket operations are independent, they can
-be fanned out across a small `concurrent.futures.ThreadPoolExecutor`, turning
-`O(n)` serial IPC latency into roughly the cost of the slowest single call:
-
-```python
-# sketch — not yet applied (touches the live order path; needs a terminal to validate)
-with ThreadPoolExecutor(max_workers=3) as pool:
-    futures = [
-        pool.submit(broker.close_ticket, a.ticket, a.volume) if a.kind == "partial_close"
-        else pool.submit(broker.modify_sl, a.ticket, a.sl)
-        for a in actions
-    ]
-    for f in futures:
-        f.result(timeout=1.0)
-```
-
-This one is left as a reviewed design note rather than auto-applied: it mutates
-live orders and cannot be meaningfully validated without a running terminal.
+</td>
+</tr>
+</table>
 
 ---
 
-## Setup / Installation
+## 🗺️ Roadmap · מפת דרכים
 
-**Requirements:** Python **3.11+**. Live trading additionally needs a Windows
-machine running the **MetaTrader 5 terminal** with *Algo Trading* enabled.
+The path from a fresh clone to a live account — every arrow is a manual, reviewable
+step. Nothing advances to the next box automatically.
+*הדרך מ-clone טרי ועד חשבון חי — כל חץ הוא שלב ידני שנבדק בעין. שום דבר לא מתקדם
+לתיבה הבאה אוטומטית.*
+
+```mermaid
+flowchart LR
+    A["🐍 1. Install<br/>Python 3.11+<br/>pip install -r requirements.txt"]
+    B["🔑 2. Configure<br/>.env (optional) · MT5 terminal<br/>+ DEMO account + Algo Trading ON"]
+    C["🧪 3. Verify<br/>pytest (445 green)<br/>sim_realistic.py @ honest spread"]
+    D["🌙 4. Demo run<br/>python -m orb live --broker mt5<br/>(demo-guarded by default)"]
+    E["📊 5. Monitor<br/>live_state.py · live_report.py<br/>PF / win% / maxDD"]
+    F{"Looks good?"}
+    G["🚀 6. Go live<br/>add --live explicitly<br/>(owner decision only)"]
+
+    A --> B --> C --> D --> E --> F
+    F -- "not yet" --> C
+    F -- "yes" --> G
+
+    style A fill:#3776AB,color:#fff
+    style B fill:#0A7CFF,color:#fff
+    style C fill:#0A9EDC,color:#fff
+    style D fill:#f2b134,color:#000
+    style E fill:#6c5ce7,color:#fff
+    style F fill:#2d3436,color:#fff
+    style G fill:#d63031,color:#fff
+```
+
+**Choosing a strategy** — pick one via `--strategy`; `orb` is the only one proven
+live, the other two are documented research (see [verdicts](#-honest-strategy-verdicts--מסקנות-כנות)):
+
+```mermaid
+flowchart TD
+    S{"--strategy ?"}
+    S -->|"default · proven live"| ORB["🟢 orb — ORB + momentum<br/>live on XAUUSD + US100"]
+    S -->|"research · no edge"| SVP["🟡 svp — Session Volume Profile<br/>magic 20260620, off by default"]
+    S -->|"research · no edge · armed"| SMC["🟡 smc — multi-TF SMC/ICT A+<br/>magic 20260621, off by default"]
+
+    style ORB fill:#00b894,color:#fff
+    style SVP fill:#fdcb6e,color:#000
+    style SMC fill:#fdcb6e,color:#000
+```
+
+---
+
+## 🕹️ Operating Guide · מדריך תפעול
+
+Every step below is one command. English first, Hebrew (עברית, כתיבה מימין לשמאל)
+directly under it — the commands themselves are identical in both languages.
+
+<table>
+<tr><td width="50%" valign="top">
+
+### 🇬🇧 Step 1 — Install
+
+</td><td width="50%" valign="top">
+
+<div dir="rtl">
+
+### 🇮🇱 שלב 1 — התקנה
+
+</div>
+
+</td></tr>
+<tr><td colspan="2">
+
+Requires **Python 3.11+**. Clone the repo, then:
 
 ```bash
-git clone <repo-url> FreqTrading
-cd FreqTrading
-
-# create / activate a virtual environment (recommended)
-python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # Linux/macOS
-
-# runtime deps (MetaTrader5 installs only on Windows via an env-marker;
-# the engine + tests run fine on Linux/macOS without it)
-pip install -r requirements.txt
-
-# for development (tests + lint + format)
-pip install -r requirements-dev.txt
+pip install -r requirements.txt        # runtime (MetaTrader5 on Windows only)
+pip install -r requirements-dev.txt    # dev: pytest, flake8, black (optional)
 ```
 
-Optional API keys (only for the cloud feed / macro sidecar) go in an untracked
-`.env`:
+<div dir="rtl">
 
+דורש **Python 3.11 ומעלה**. שכפלו (clone) את המאגר, ואז:
+הפקודה למעלה מתקינה את התלויות להרצה (MetaTrader5 — בחלונות בלבד) ואת כלי הפיתוח (אופציונלי).
+
+</div>
+
+</td></tr>
+
+<tr><td width="50%" valign="top">
+
+### 🇬🇧 Step 2 — Configure
+
+</td><td width="50%" valign="top">
+
+<div dir="rtl">
+
+### 🇮🇱 שלב 2 — הגדרה
+
+</div>
+
+</td></tr>
+<tr><td colspan="2">
+
+1. Install **MetaTrader 5**, log into a **DEMO account** (JustMarkets or any broker),
+   and enable **Algo Trading** (toolbar button must be green).
+2. (Optional, for historical data fetch only) create `.env` in the repo root:
+   ```env
+   TWELVEDATA_API_KEY=your_key_here
+   ```
+3. **Never commit `.env` or broker credentials.** MT5 login happens inside the
+   terminal itself — the bot never touches your password.
+
+<div dir="rtl">
+
+1. התקינו **MetaTrader 5**, התחברו ל-**חשבון דמו** (JustMarkets או כל ברוקר אחר),
+   והפעילו **Algo Trading** (כפתור בסרגל הכלים — חייב להיות ירוק).
+2. (אופציונלי, רק עבור שליפת נתונים היסטוריים) צרו קובץ `.env` בשורש המאגר עם מפתח TwelveData.
+3. **לעולם אל תעלו (commit) קובץ `.env` או פרטי גישה לברוקר.** ההתחברות ל-MT5 מתבצעת
+   בתוך הטרמינל עצמו — הבוט לא נוגע בסיסמה שלכם.
+
+</div>
+
+</td></tr>
+
+<tr><td width="50%" valign="top">
+
+### 🇬🇧 Step 3 — Verify (before touching real money)
+
+</td><td width="50%" valign="top">
+
+<div dir="rtl">
+
+### 🇮🇱 שלב 3 — אימות (לפני נגיעה בכסף אמיתי)
+
+</div>
+
+</td></tr>
+<tr><td colspan="2">
+
+```bash
+pytest                                              # 445 tests, must be green
+python -m orb replay data/xauusd_1m_*.csv           # signal-only backtest
+python scripts/sim_realistic.py data/xauusd_1m_*.csv --spread 0.10 --commission 7
 ```
-TWELVEDATA_API_KEY=...   # historical fetch / fallback feed
-FRED_API_KEY=...         # macro VIX confirm + actuals (optional)
+
+Always check backtests **at the honest broker spread**, not an optimistic
+assumption — every strategy verdict in this repo is graded that way.
+
+<div dir="rtl">
+
+הריצו את הפקודות למעלה: חבילת הבדיקות (445, חייבות להיות ירוקות), בקטסט אותות בלבד,
+ואז סימולציית ביצוע ריאליסטית (spread ועמלה אמיתיים). **תמיד** בדקו תוצאות לפי ה-spread
+האמיתי של הברוקר, לא לפי הנחה אופטימית — כך נבדקת כל אסטרטגיה במאגר הזה.
+
+</div>
+
+</td></tr>
+
+<tr><td width="50%" valign="top">
+
+### 🇬🇧 Step 4 — Run on demo (default: `orb`, proven live)
+
+</td><td width="50%" valign="top">
+
+<div dir="rtl">
+
+### 🇮🇱 שלב 4 — הרצה על דמו (ברירת מחדל: `orb`, מוכחת בחי)
+
+</div>
+
+</td></tr>
+<tr><td colspan="2">
+
+```bash
+python -m orb live --broker mt5 --qty 0.05 --entry limit \
+  --stop-min 2 --stop-max 4 --roc-min 0.15 --spike-cancel 2.5 \
+  --max-daily-loss 110 --tp-rrr 2 --session-len 1440 \
+  --rearm --rearm-range rebuild --trueopen-filter deadzone
+```
+
+This refuses to run on a **live (non-demo) account** unless you pass `--live`
+explicitly — the bot cannot accidentally trade real money.
+
+<div dir="rtl">
+
+הפקודה מסרבת לרוץ על **חשבון חי** אלא אם מעבירים `--live` במפורש — הבוט לא יכול
+לסחור בכסף אמיתי בטעות.
+
+</div>
+
+</td></tr>
+
+<tr><td width="50%" valign="top">
+
+### 🇬🇧 Step 5 — Monitor
+
+</td><td width="50%" valign="top">
+
+<div dir="rtl">
+
+### 🇮🇱 שלב 5 — ניטור
+
+</div>
+
+</td></tr>
+<tr><td colspan="2">
+
+```bash
+python scripts/live_state.py                        # current bots/positions snapshot
+python scripts/live_report.py --magic 20260610 --days 30   # XAUUSD ORB PF/win%/maxDD/…
+python scripts/live_report.py --known --days 90      # score EVERY known bot at once
+```
+
+`live_report.py` prints Profit Factor, win rate, day-win %, avg win/loss, max
+drawdown ($ and %), recovery factor, consistency, and time-of-day / duration
+breakdowns — straight from the MT5 account history, by magic number.
+
+<div dir="rtl">
+
+`live_report.py` מדפיס Profit Factor, אחוז ניצחונות, אחוז ימים מרוויחים, רווח/הפסד
+ממוצע, דרדאון מקסימלי (בדולר ובאחוז), פקטור התאוששות, עקביות, ופילוח לפי שעה/משך
+עסקה — ישירות מהיסטוריית חשבון ה-MT5, לפי מספר magic.
+
+</div>
+
+</td></tr>
+
+<tr><td width="50%" valign="top">
+
+### 🇬🇧 Step 6 — Go live (explicit, owner decision only)
+
+</td><td width="50%" valign="top">
+
+<div dir="rtl">
+
+### 🇮🇱 שלב 6 — מעבר לחי (החלטה מפורשת של הבעלים בלבד)
+
+</div>
+
+</td></tr>
+<tr><td colspan="2">
+
+```bash
+python -m orb live --broker mt5 --live --qty 0.05 --entry limit \
+  --stop-min 2 --stop-max 4 --roc-min 0.15 --spike-cancel 2.5 \
+  --max-daily-loss 110 --tp-rrr 2 --session-len 1440 \
+  --rearm --rearm-range rebuild --trueopen-filter deadzone
+```
+
+Only add `--live` **after** the demo run shows the numbers you expect in
+`live_report.py`. Keep MT5 + Algo Trading running continuously; the daily-loss
+breaker (`--max-daily-loss`) is mandatory risk protection, not optional.
+
+<div dir="rtl">
+
+הוסיפו `--live` **רק אחרי** שההרצה על דמו מראה את המספרים שציפיתם להם ב-`live_report.py`.
+השאירו את MT5 ו-Algo Trading פועלים ברציפות; שובר ה-daily-loss (`--max-daily-loss`)
+הוא הגנת סיכון חובה, לא אופציונלית.
+
+</div>
+
+</td></tr>
+
+<tr><td width="50%" valign="top">
+
+### 🇬🇧 Optional — MQL5 EA (SMC engine, copy-trading master)
+
+</td><td width="50%" valign="top">
+
+<div dir="rtl">
+
+### 🇮🇱 אופציונלי — EA ב-MQL5 (מנוע SMC, חשבון מאסטר להעתקת מסחר)
+
+</div>
+
+</td></tr>
+<tr><td colspan="2">
+
+1. Copy `mql5/SmcXau_EA.mq5` into the terminal's `MQL5/Experts/` folder.
+2. Open **MetaEditor**, open the file, press **F7** — expect `0 errors, 0 warnings`.
+3. Attach it to an **XAUUSD.ecn M15** chart on a **demo** account; confirm Algo
+   Trading is enabled.
+4. Watch the Experts/Journal tab for bias + confluence log lines on each M15 close.
+5. Run a **Strategy Tester** pass (M1, real ticks) before pointing any copy-trade
+   master account at it.
+
+<div dir="rtl">
+
+1. העתיקו את `mql5/SmcXau_EA.mq5` לתיקיית `MQL5/Experts/` של הטרמינל.
+2. פתחו את **MetaEditor**, פתחו את הקובץ, לחצו **F7** — יש לצפות ל-"0 errors, 0 warnings".
+3. חברו אותו לגרף **XAUUSD.ecn בטווח M15** בחשבון **דמו**; ודאו ש-Algo Trading פעיל.
+4. עקבו אחרי לשונית ה-Journal לשורות לוג של הטיה ומיזוגים (confluence) בכל סגירת M15.
+5. הריצו **Strategy Tester** (M1, טיקים אמיתיים) לפני חיבור כל חשבון מאסטר להעתקת מסחר.
+
+</div>
+
+</td></tr>
+</table>
+
+---
+
+## 🧩 Core modules (`orb/`)
+
+| Module | Role |
+|--------|------|
+| `engine.py` | Pure sync state machine — ROC gate, ATR ratchet, 20–40p stop, partial TP, rearm/rebuild |
+| `stream.py` | Async live wrapper · `engine.replay()` for backtests |
+| `broker/mt5.py` | MT5 execution — market or limit mode, demo-only guard (`--live` overrides) |
+| `babysitter.py` | Per-ticket exit manager — 70% off at +2R, stop chases remainder, tighten-only |
+| `riskguard.py` | Daily-loss circuit breaker + momentum-spike limit cancel |
+| `macroguard.py` | Pure consumer of `macro_state.json` — entry veto / qty-scale / risk-off (off by default) |
+| `trueopen.py` · `quarters.py` | True Open levels (TDO/session/week) · Quarters Theory cycles |
+| `feeds/` | `mt5feed.py` (local terminal, preferred live) · `twelvedata.py` (cloud REST + fallback) |
+| `svp/` | **Standalone** Session Volume Profile "Edge Rotation" strategy (research, off by default) |
+| `smc/` | **Standalone** multi-timeframe SMC/ICT A+ engine — H4/D1 bias (BOS/CHOCH, sweeps, order blocks, POC), M15 confirmation, ≥3 confluences, layered 5R/7R/10R exits + BE/trail (magic 20260621, off by default) |
+| `analytics.py` | Pure trade-metrics suite (PF, win rates, maxDD, recovery factor, consistency, by-hour/duration); consumed by backtests + `scripts/live_report.py` |
+
+---
+
+## 🧬 Architecture
+
+```mermaid
+graph TD
+    F["📡 feeds/<br/>mt5feed · twelvedata"] --> E["⚙️ engine.py<br/>ORB state machine"]
+    E --> S["🔀 stream.py<br/>async live / replay"]
+    S --> B["🏦 broker/mt5.py<br/>market · limit"]
+    B --> BABY["👶 babysitter.py<br/>exit manager"]
+    E --> RG["🛡️ riskguard.py"]
+    MAC["🌐 macro/ sidecar<br/>macro_state.json"] -.veto/scale.-> MG["macroguard.py"] -.-> E
+    SVP["📊 svp/ (research)"] -.parallel.-> S
+    SMC["🎯 smc/ (research)"] -.parallel.-> S
+    SMC -.port.-> EA["🖥️ mql5/SmcXau_EA.mq5"]
+    S --> AN["📈 analytics.py<br/>+ scripts/live_report.py"]
 ```
 
 ---
 
-## Usage examples
+## 🚀 Running (quick reference)
 
 ```bash
-# Live ORB on the local MT5 terminal (demo account by default)
+# Live (full ORB ruleset, demo)
 python -m orb live --broker mt5 --qty 0.05 --entry limit \
   --stop-min 2 --stop-max 4 --roc-min 0.15 --spike-cancel 2.5 \
   --max-daily-loss 110 --tp-rrr 2 --session-len 1440 \
   --rearm --rearm-range rebuild --trueopen-filter deadzone
 
-# Live with the MT5-native feed explicitly (near-zero feed lag)
-python -m orb live --source orb.feeds.mt5feed:xauusd_live --broker mt5 \
-  --symbol XAUUSD.ecn --max-daily-loss 110
+# Backtest a CSV
+python -m orb replay <csv>
 
-# Backtest: fast signal replay over a CSV of 1m candles
-python -m orb replay data/xauusd_1m_*.csv --session-open auto --json
+# Realistic execution sim (limit fills, babysitter, spread+commission)
+python scripts/sim_realistic.py data/*.csv --strategy {orb,svp,smc}
 
-# Full-fidelity simulation (limit fills, babysitter, spread + commission)
-python scripts/sim_realistic.py data/xauusd_1m_*.csv \
-  --spread 1.10 --commission 7 --start-balance 1000 --max-daily-loss-pct 10
+# Score any live bot by magic number
+python scripts/live_report.py --known --days 30
 
-# Macro sidecar: keep macro_state.json fresh, then consume it (shadow mode)
-python -m macro run --geo --news --semis
-python -m orb live --broker mt5 --macro-mode shadow --macro-state-path macro_state.json
+# Fetch data (Twelve Data — TWELVEDATA_API_KEY in .env)
+python -m orb fetch
 
-# Fetch historical candles (Twelve Data; needs TWELVEDATA_API_KEY)
-python -m orb fetch --symbol XAU/USD --outputsize 500 --out data/xauusd.csv
+# Tests
+pytest      # 445 passing
 ```
 
-> **Safety:** `orb live --broker mt5` refuses any non-demo account unless you pass
-> `--live`. Keep it on demo unless you fully understand the risk.
+> 🪟 **Windows-only for live orders:** the MT5 terminal must run with **Algo Trading enabled**.
+> The core engine + backtests are pure-stdlib and run anywhere.
+> See the [Operating Guide](#️-operating-guide--מדריך-תפעול) above for the full bilingual walkthrough.
 
 ---
 
-## Testing
+## 📊 Honest strategy verdicts · מסקנות כנות
 
-```bash
-pytest -q          # 273 tests; pure stdlib — runs offline, no MT5 needed
-```
+<details>
+<summary><b>🌐 Macro layer</b> (M0–M6, sidecar) — click to expand</summary>
 
-The broker, feed and clock are dependency-injected (`mt5=`, `now_fn=`), so the
-entire system — including the async feed and the background broker-state cache —
-is exercised deterministically with fakes. No live terminal or network is touched.
+<br/>
+
+A separate local process fetches macro/fundamental data (economic calendar, FRED, GDELT,
+sentiment, market proxies) and writes a single `macro_state.json`. Each `orb live` reads it
+via `orb/macroguard.py` as an entry veto / qty-scale / risk-off layer. **Off by default**
+(`--macro-mode off`); fail-safe (macro down ⇒ trade as normal).
+
+- **M1** — ForexFactory calendar + high-impact blackout windows (NFP/CPI/FOMC).
+- **M2** — surprise scorer → per-asset bias; `filter` mode vetoes bias-conflicting entries.
+- **M3** — GDELT tone + VIX-confirmed `war_spike`; `guard` mode closes positions on hard blackout.
+- **M4/M5** — headline sentiment (RSS lexicon) + AI/semis thematic tilt.
+- **M6** — backtest gate: PF before/after the macro filter per symbol.
+
+Rollout staged **off → shadow → filter → guard**. See `PLAN_MACRO_LAYER.md`, D-013.
+
+</details>
+
+<details>
+<summary><b>📊 SVP research verdict</b> (honest) — click to expand</summary>
+
+<br/>
+
+The standalone **Session Volume Profile** strategy (`--strategy svp`, magic `20260620`) fades
+VAH/VAL→POC on balanced days and trades LVN breaks. **It does NOT survive realistic gold costs:**
+at a $1.10 spread ($7/lot comm) the edge is net-negative on 1m/5m/15m (break-even spread
+≈ $0.55–0.62). Higher timeframe is far safer on drawdown (maxDD 49% on 15m vs 321% before the
+risk fix). Top next lever: switch market entries → limit-at-shelf. Research-stage, off by default.
+See D-015, D-016.
+
+</details>
+
+<details>
+<summary><b>🎯 SMC research verdict</b> (honest) — click to expand</summary>
+
+<br/>
+
+The standalone **multi-timeframe SMC/ICT** engine (`--strategy smc`, magic `20260621`) trades
+H4/D1 structural bias (BOS/CHOCH + liquidity sweeps + unmitigated order blocks + POC) confirmed
+on M15 with ≥3 confluences, targeting 1:5–1:10 R:R with layered partials and a breakeven/trail
+ladder armed at +2R. **The exit ladder works exactly as designed** (asymmetric: winners run ~5R,
+losers cap at breakeven/small; multi-day holds fire) — but **gold does not survive realistic
+costs:** PF **0.46** (73 trades, 2026-03-03→06-12 window) and PF **0.15** (2026-03-21→06-12
+window) at real spread. Reconfirms D-016…D-020: no ICT/sweep variant has a replicable gold edge.
+**Shipped armed anyway** (owner decision) — the negative verdict is recorded, not hidden. Off by
+default. See D-027.
+
+</details>
+
+<details>
+<summary><b>✅ US100 ORB — the one positive-edge result</b> — click to expand</summary>
+
+<br/>
+
+The default **ORB** strategy on **US100** is the only strategy in this repo with a confirmed
+positive edge at the **real measured spread** (0.6pt, not the conservative 1.0pt assumption):
+PF **2.23** on the full backtest window. Not yet robust on every held-out split — see D-025.
+Live on `US100.ecn`, magic `20260611`.
+
+</details>
+
+<details>
+<summary><b>📁 Project lifecycle files</b></summary>
+
+<br/>
+
+Managed under a 5-file lifecycle protocol (`CLAUDE.md`): `README.md` (overview) ·
+`STATUS.md` (current state) · `PROGRESS.md` (timeline) · `DECISIONS.md` (decision log) ·
+`CLAUDE_MEMORY.md` (AI rules). Strategy spec lives in `STRATEGY.md`; Pine sources in
+`AMD_pro_v1.pine`, `Ture_Open_Price.pine`. The MQL5 Expert Advisor port of the SMC engine
+(`mql5/SmcXau_EA.mq5`) is self-contained — copy into a terminal's `MQL5/Experts/` and compile.
+
+</details>
 
 ---
 
-## Continuous integration
+<div align="center">
 
-`.github/workflows/ci.yml` runs on every push and PR, against Python 3.11 and
-3.12 on `ubuntu-latest`:
+**Built by [@www8351](https://github.com/www8351)**
 
-1. **flake8 — critical** (`E9,F63,F7,F82`): syntax errors / undefined names **block** the build.
-2. **flake8 — full**: style/complexity, *advisory* (surfaced, non-blocking).
-3. **black --check**: format drift, *advisory* (pending a one-off repo-wide format pass).
-4. **pytest**: the full suite, blocking.
+<sub>Secrets stay out of version control · MT5 demo-guarded · direct, concise, technical.</sub>
 
-Lint config lives in `.flake8`; format config in `pyproject.toml` `[tool.black]`.
-
----
-
-## Project layout
-
-```
-orb/            execution engine: feeds, broker, risk/macro guards, babysitter, svp/
-macro/          sidecar: macro/fundamental data collectors → macro_state.json
-scripts/        backtests, simulators, data fetch, Windows keeper (bots.ps1)
-tests/          273 unit/integration tests (fakes for MT5/feed/clock)
-data/           historical candle CSVs
-```
-
----
-
-## Constraints & conventions
-
-- **Secrets never in VCS** (`.env` is untracked).
-- **MT5 terminal must have Algo Trading enabled** for live orders.
-- This workspace follows a file-based lifecycle protocol (`CLAUDE.md`): the source
-  of truth for *current state* is `STATUS.md`, the *timeline* is `PROGRESS.md`,
-  and *design decisions* (including honest strategy verdicts) are in
-  `DECISIONS.md` / `STRATEGY.md`. Read those before changing architecture.
-
-## License
-
-No license is currently specified — all rights reserved. Contact the owner before
-reuse.
-
-## Tone notes
-
-Direct, concise, technical. No filler.
+</div>

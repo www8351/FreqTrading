@@ -353,6 +353,72 @@ def run_svp(candles: list[Candle], risk_pct: float = 3.0, spread: float = 0.25,
     return sim.closed
 
 
+def run_smc(candles: list[Candle], *, risk_pct: float = 2.0, spread: float = 1.10,
+            comm: float = 7.0, max_daily_loss_pct: float = 10.0,
+            start_balance: float = 1000.0,
+            value_per_move: float = USD_PER_LOT_PER_DOLLAR,
+            vol_min: float = 0.01, vol_step: float = 0.01, vol_max: float = 50.0,
+            **smc_ov) -> list[dict]:
+    """Execution-true SMC backtest: multi-timeframe Smart Money Concepts A+
+    entries (M15 decision / H4 bias / D1 veto), structural stops, dynamic
+    risk_pct sizing, ladder exits (partials + BE + swing/ATR trail). Byte-for-byte
+    harness parity with :func:`run_svp` — only the engine and the exit sitter
+    differ; the Sim, spike-cancel, and daily-halt plumbing are identical.
+
+    ``smc_ov`` is filtered to valid SmcConfig fields, so unrelated kwargs are
+    dropped rather than raising. The new market entry is opened AFTER on_bar so
+    it is never SL-checked on its own bar.
+    """
+    from dataclasses import fields
+
+    from orb.smc import SmcConfig, SmcEngine
+    from orb.smc.exits import LadderExitManager
+    from orb.svp import compute_lot
+
+    valid = {f.name for f in fields(SmcConfig)}
+    cfg = SmcConfig(risk_pct=risk_pct,
+                    **{k: v for k, v in smc_ov.items() if k in valid})
+    engine = SmcEngine(cfg)
+    sim = Sim(qty=0.0, spread=spread, commission_rt=comm,
+              value_per_move=value_per_move)
+    sitter = LadderExitManager(
+        partial_levels=cfg.partial_levels, final_tp_r=cfg.final_tp_r,
+        be_at_r=cfg.be_at_r, trail_start_r=cfg.trail_start_r,
+        trail_mode=cfg.trail_mode, trail_atr_mult=cfg.trail_atr_mult,
+        trail_buffer=cfg.trail_buffer, swing_lookback=cfg.swing_lookback,
+        atr_period=cfg.atr_period, trail_tf_min=cfg.trigger_tf_min,
+        vol_min=vol_min, vol_step=vol_step)
+    spike = SpikeCancel(ratio=2.5)
+    breaker = DailyLossBreaker(max_daily_loss_pct=max_daily_loss_pct)
+
+    for c in candles:
+        # re-arm the engine once the sim's real position has fully closed (the
+        # ladder trailed/stopped/took the runner out). Checked at the TOP of the
+        # loop so the just-placed entry (opened AFTER on_bar last iteration) is
+        # already in sim.positions — avoids re-arming on the entry bar itself.
+        # Mirrors the live cli force_flat sync; SMC is a multi-day hold, so the
+        # engine stays IN position across sessions until the trade is actually
+        # flat — unlike SVP, which force-exits at each session boundary.
+        if engine.position is not None and not sim.positions:
+            engine.force_flat(c.ts)
+        sitter.observe(c)
+        sig = engine.on_candle(c)
+        bal = start_balance + sim.equity
+        halted = breaker.update(c.ts.date(), bal)
+        is_spike = spike.update(c.high, c.low)
+        sim.on_bar(c, sitter, is_spike, halted)     # exits for existing positions
+        if (sig is not None and sig.kind is SignalKind.ENTRY and sig.stop
+                and not halted):
+            remaining = max(0.0, breaker.day_cap + breaker.day_pnl)
+            lot = compute_lot(bal, cfg.risk_pct, sig.price, sig.stop,
+                              value_per_move, vol_min, vol_step, vol_max,
+                              max_risk=remaining)
+            if lot > 0:
+                sim.place_market(sig, c.ts, lot,
+                                 {"dir": sig.direction.value, "reason": sig.reason})
+    return sim.closed
+
+
 # --------------------------------------------------------------------------- #
 def metrics(trades: list[dict], start_balance: float = 1000.0) -> dict:
     n = len(trades)
@@ -413,7 +479,7 @@ def _parse_killzones(spec: str) -> tuple[tuple[int, int], ...]:
     return tuple(out)
 
 
-def main() -> None:
+def build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("csvs", nargs="*", default=["data/*.csv"])
     ap.add_argument("--qty", type=float, default=0.05)
@@ -422,8 +488,9 @@ def main() -> None:
                     help="$ per 1.0 lot round-trip")
     ap.add_argument("--symbol", default="XAUUSD",
                     help="symbol tag for emitted trades (default XAUUSD)")
-    ap.add_argument("--strategy", choices=("orb", "svp"), default="orb",
-                    help="orb (default) or svp (Session Volume Profile Edge Rotation)")
+    ap.add_argument("--strategy", choices=("orb", "svp", "smc"), default="orb",
+                    help="orb (default), svp (Session Volume Profile Edge Rotation), "
+                         "or smc (multi-timeframe Smart Money Concepts)")
     ap.add_argument("--timeframe", choices=tuple(_TF_MINUTES), default="1m",
                     help="aggregate 1m input to this bar size before running "
                          "(svp only; 1m = no aggregation)")
@@ -461,8 +528,31 @@ def main() -> None:
     ap.add_argument("--svp-max-consec-losses", dest="svp_max_consec_losses",
                     type=int, default=0,
                     help="stop new entries after N losing trades in a row (0=off)")
+    # --- SMC tunables (smc strategy only; None = use SmcConfig default) -----
+    ap.add_argument("--smc-risk-pct", dest="smc_risk_pct", type=float, default=2.0,
+                    help="SMC risk per trade as %% of balance (default 2.0)")
+    ap.add_argument("--smc-min-confluences", dest="smc_min_confluences", type=int,
+                    help="A+ confluences required to fire, 1..6 (default 3)")
+    ap.add_argument("--smc-disp-atr-mult", dest="smc_disp_atr_mult", type=float,
+                    help="displacement range vs ATR minimum (default 1.2)")
+    ap.add_argument("--smc-poc-tol", dest="smc_poc_tol", type=float,
+                    help="price distance counted as 'at POC' (default 2.0)")
+    ap.add_argument("--smc-stop-max-dist", dest="smc_stop_max_dist", type=float,
+                    help="reject entries with a structural stop wider than this")
+    ap.add_argument("--smc-max-trades-per-day", dest="smc_max_trades_per_day",
+                    type=int, help="cap entries per UTC day (default 2)")
+    ap.add_argument("--smc-trail-mode", dest="smc_trail_mode",
+                    choices=("swing", "atr"),
+                    help="runner trail: swing structure or ATR (default swing)")
+    ap.add_argument("--smc-final-tp-r", dest="smc_final_tp_r", type=float,
+                    help="final take-profit R (0 = runner trails out; default 10)")
     ap.add_argument("--emit-trades", dest="emit_trades",
                     help="write entry trades as JSON for scripts/backtest_macro.py")
+    return ap
+
+
+def main() -> None:
+    ap = build_argparser()
     args = ap.parse_args()
 
     paths = [p for a in args.csvs for p in glob.glob(a)]
@@ -510,6 +600,33 @@ def main() -> None:
             sub = [t for t in trades if t["dir"] == d]
             if sub:
                 report(f"  {d}", sub, sb)
+        if args.emit_trades:
+            write_trades_json(trades_to_records(trades, args.symbol),
+                              args.emit_trades)
+        return
+
+    if args.strategy == "smc":
+        import orb.analytics as analytics
+        sb = args.start_balance
+        # only pass through overrides the user actually set (None = default)
+        smc_ov = {k: v for k, v in (
+            ("min_confluences", args.smc_min_confluences),
+            ("disp_atr_mult", args.smc_disp_atr_mult),
+            ("poc_tol", args.smc_poc_tol),
+            ("stop_max_dist", args.smc_stop_max_dist),
+            ("max_trades_per_day", args.smc_max_trades_per_day),
+            ("trail_mode", args.smc_trail_mode),
+            ("final_tp_r", args.smc_final_tp_r),
+        ) if v is not None}
+        print(f"# risk={args.smc_risk_pct}%/trade daily={args.max_daily_loss_pct}% "
+              f"start=${sb:.0f}")
+        print(f"# smc: {smc_ov or 'defaults'}\n")
+        trades = run_smc(candles, risk_pct=args.smc_risk_pct, spread=args.spread,
+                         comm=args.commission,
+                         max_daily_loss_pct=args.max_daily_loss_pct,
+                         start_balance=sb, **smc_ov)
+        print(analytics.format_report(analytics.from_sim(trades),
+                                      start_balance=sb, title="SMC XAUUSD"))
         if args.emit_trades:
             write_trades_json(trades_to_records(trades, args.symbol),
                               args.emit_trades)
