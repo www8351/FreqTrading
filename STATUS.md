@@ -1,5 +1,16 @@
 # STATUS
 
+## 2026-07-04 (later) — README redesigned: bilingual (EN/HE) operating guide + visual roadmap
+- Owner asked (in Hebrew) for bilingual EN/HE operating instructions and a nicer README with a
+  roadmap + install/run visualization. Docs-only change, no code touched.
+- `README.md` rewritten: added a TOC, two mermaid roadmap diagrams (install→verify→demo→monitor→
+  live decision gate; and a `--strategy` chooser orb/svp/smc), and a full bilingual **Operating
+  Guide** (6 steps + optional MQL5 EA compile walkthrough) — English and Hebrew (RTL) side by side
+  per step, same commands under both. Added a matching "SMC research verdict" collapsible (parity
+  with the existing SVP one) and a "US100 ORB — the one positive-edge result" collapsible so the
+  honest verdicts are all visible in one place. pytest badge corrected 226→445.
+- **Next:** owner review of the new README; no further action required.
+
 ## 2026-07-04 — SMC A+ system COMPLETE: orb/smc/ + MQL5 EA + pro-metrics (445/445 suite, ARMED)
 - Delivered the owner's multi-timeframe SMC/ICT XAUUSD system end-to-end (goal `/alter review`).
   New standalone `orb/smc/` package (magic **20260621**), a self-contained MQL5 EA, and a pro-metrics

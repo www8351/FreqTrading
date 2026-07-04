@@ -1,5 +1,17 @@
 # PROGRESS
 
+## 2026-07-04 (later) — README redesign: bilingual EN/HE operating guide + roadmap diagrams
+- Owner request (Hebrew): operating instructions in Hebrew + English, and a nicer README with a
+  roadmap and visualization of the install/run flow.
+- Rewrote `README.md`: TOC anchors; two Mermaid diagrams (6-stage install→verify→demo→monitor→
+  live-decision roadmap; strategy-chooser orb/svp/smc); a 6-step bilingual **Operating Guide**
+  table (install, configure, verify-before-real-money, demo run, monitor via `live_report.py`,
+  go-live gate) plus an optional MQL5 EA compile/attach walkthrough — English left, Hebrew (RTL)
+  right, identical shared commands. Added an SMC honest-verdict collapsible (parity with SVP's)
+  and a US100-ORB positive-edge collapsible so every strategy verdict is visible from the README.
+  Corrected the stale pytest badge (226→445).
+- Docs-only; no code changed, no tests affected.
+
 ## 2026-07-04 — SMC A+ system built end-to-end (orb/smc/ + MQL5 EA + analytics), ARMED, honest verdict recorded
 - **Context:** goal `/alter review` — owner wants a precision multi-TF SMC/ICT XAUUSD system feeding his
   copy-trader. Locked (AskUserQuestion): Python module + MQL5 EA; ship-armed; 2% risk; add a pro-metrics
