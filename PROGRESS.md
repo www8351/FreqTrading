@@ -1,5 +1,30 @@
 # PROGRESS
 
+## 2026-07-04 (latest) — Part 2: execution layer + copy-trade broadcast, TDD build
+- Ran the approved plan (`~/.claude/plans/part-2-part-1-fizzy-thunder.md`) as a background workflow:
+  8 parallel/chained build tasks (schema doc, tradeevents, broker event emission, retcodes+retry,
+  execguard, symbols, broadcast, leader sidecar) then CLI wiring then adversarial review.
+- **Session-limit interruption:** the workflow's CLI-wiring task and the review task were cut off
+  mid-run by a token session cap. On resume, checked actual state instead of assuming failure —
+  the build tasks (T1-T8) had landed cleanly, and CLI wiring had ALSO landed (`orb/cli.py` modified,
+  `tests/test_cli_part2.py` present) before the cutoff; only 2 of ~30 new tests were failing.
+- **Fix 1 — `UnboundLocalError: dataclasses`:** a pre-existing function-local `import dataclasses`
+  at the tail of `on_signal` (serving the macro qty-scale branch) makes `dataclasses` a local name
+  for the ENTIRE function per Python scoping rules — so the new ORB risk-pct sizing block's
+  `dataclasses.replace` call, which now runs earlier in the same function, hit an UnboundLocalError.
+  Removed the redundant local import (module-level `import dataclasses` at the top already covers
+  it); macro branch behavior unchanged.
+- **Fix 2 — broadcaster never closed:** Task 11's `bcaster.close()` wiring into `cmd_live`'s
+  `finally` block was the part cut off by the session limit. Added it (drains the spool before
+  `broker.shutdown()`) + a shutdown log line for non-empty `retcode_counts`.
+- **Verify:** `python -m pytest -q` → 588 passed, 0 failures (445 pre-existing + 143 new Part 2).
+- **Also resolved:** committed git merge-conflict markers in DECISIONS.md/STATUS.md/PROGRESS.md
+  (found while cross-checking the plan against these files, per owner instruction) — merged both
+  sides chronologically, no content lost, annotated the `orb/brokerstate.py` claim as an unlanded
+  stash (file absent from the working tree; the 273-test figure belongs to that stash).
+- **Next:** the adversarial review agent was also cut off by the session limit — re-run it before
+  calling this done. Owner review/commit after. No live bot touched.
+
 ## 2026-07-04 (later) — README redesign: bilingual EN/HE operating guide + roadmap diagrams
 - Owner request (Hebrew): operating instructions in Hebrew + English, and a nicer README with a
   roadmap and visualization of the install/run flow.
@@ -53,8 +78,6 @@
 - **Verified:** `tests/test_smc_strategy.py` 15/15; full suite `python -m pytest -q` 422 passed.
 - **Engine code: unchanged.** No SmcEngine bug found; the warmup entry is correct A+ behaviour.
 
-<<<<<<< Updated upstream
-=======
 ## 2026-06-27 — Public packaging + latency optimizations (no behaviour change)
 - **Goal:** package the repo as a public GitHub showcase (AI/DevOps positioning) + shave execution
   latency, without altering trading logic.
@@ -68,6 +91,8 @@
 - **Latency opt 2 — broker-state cache** (`orb/brokerstate.py`, wired in `orb/cli.py`): a background
   asyncio task refreshes balance/positions via `run_in_executor`, so `on_bar` reads a cached snapshot
   instead of making 2 blocking MT5 IPC calls on the candle path. Writes stay synchronous (no order race).
+  **(Correction, 2026-07-04: never landed — dropped in an abandoned `git stash`; file absent from the
+  working tree. The 273-passing figure below is from that stash, not the current suite.)**
 - **Latency opt 3 — parallel position routing:** documented as a design note in the README (not applied;
   mutates live orders, needs a terminal to validate).
 - **What worked:** `pytest -q` → 273 passing (added 4 brokerstate + 2 adaptive-feed tests). flake8
@@ -221,7 +246,6 @@
   same multi-window stress test. One window of PF 1.87 is not a proven edge. Next: pull a 2nd/3rd
   US100 window via `fetch_mt5_history.py` and re-run to check sign stability before any trust.
 
->>>>>>> Stashed changes
 ## 2026-06-21 (pm 5) — Filter + risk-management layer on SVP edge-rotation (D-022)
 - Owner request ("spike momentum setup"): add trend filters + institutional risk management to the
   SVP edge-rotation strategy, fix the 332% drawdown, stop longs losing into the bearish gold trend,

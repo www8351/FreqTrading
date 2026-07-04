@@ -1,5 +1,34 @@
 # STATUS
 
+## 2026-07-04 (latest) — Part 2 execution/broadcast layer built, flag-gated (588/588 suite)
+- Delivered owner spec §4-6 (companion to Part 1/D-027): production execution layer + copy-trade
+  broadcast. **All off by default; ORB/SVP/SMC live paths byte-unchanged.** See D-028.
+- **New:** `orb/tradeevents.py` (event model + JSONL log + fan-out hub), `orb/broker/retcodes.py`
+  (retcode policy table, exponential-backoff retry, double-fill guard), `orb/execguard.py` (spread
+  gate, killzone session gate, post-fill R:R-degradation check), `orb/symbols.py` (JustMarkets
+  symbol resolver: XAUUSD → .ecn/.pro/m/...), `orb/broadcast.py` (non-blocking HMAC-signed publisher
+  with disk spool), `leader/` sidecar (stdlib REST ingest + optional ZeroMQ PUB — no live
+  copy-trading backend existed on this machine, so this ships one), `docs/copytrade_schema.md`
+  (shared JSON contract for Part 1's `mql5/SmcXau_EA.mq5`).
+- **Modified:** `orb/broker/mt5.py` (event hooks, `current_spread`, `deal_profit`, injectable
+  `RetryPolicy`), `orb/cli.py` (13 new live-mode flags, all default off — `--max-spread`,
+  `--killzones`, `--resolve-symbol`, `--retry-policy`, `--max-slippage`/`--slippage-policy`,
+  `--rr-floor`, `--risk-pct`, `--max-consec-losses`, `--trade-log`, `--broadcast`).
+- **Fixed a pre-existing bug found along the way:** a function-local `import dataclasses` inside
+  `on_signal` shadowed the module import for the whole function (Python scoping), breaking the new
+  ORB risk-pct sizing call. Removed the redundant local import — macro qty-scale branch unaffected.
+- **Verify:** `python -m pytest -q` → **588 passed** (445 baseline + 143 new). Spy-broker test pins
+  byte-identical `on_signal`→broker call sequence when no new flags are passed.
+- **Also fixed this session:** committed git merge-conflict markers in DECISIONS.md/STATUS.md/
+  PROGRESS.md (both sides' content merged chronologically, nothing lost); annotated 2 entries
+  (`orb/brokerstate.py` BrokerStateCache, the 273-test figure) as describing a `git stash` that was
+  never landed — the file does not exist in the working tree.
+- **Next:** re-run the adversarial code review (previous attempt hit a session token limit before
+  completing) — focus areas: live-safety when flags off, broadcast never blocking the trading loop,
+  double-fill recovery correctness, R:R math both directions, HMAC/secret handling. Then owner
+  review/commit. `scripts/bots.ps1` untouched throughout — enabling any Part 2 feature live is a
+  separate owner action.
+
 ## 2026-07-04 (later) — README redesigned: bilingual (EN/HE) operating guide + visual roadmap
 - Owner asked (in Hebrew) for bilingual EN/HE operating instructions and a nicer README with a
   roadmap + install/run visualization. Docs-only change, no code touched.
@@ -53,10 +82,7 @@
   (H4 BOS fires an A+ setup the instant bias turns LONG) to start flat+armed. See PROGRESS 2026-07-04.
 - Next: `orb/smc/` is new/untracked — decide whether to commit; no engine changes pending.
 
-<<<<<<< Updated upstream
-_Last updated: 2026-06-21_
-=======
-_Last updated: 2026-06-27_
+_Last updated: 2026-07-04_
 
 ## 2026-06-27 — Public packaging: README + requirements + CI + latency opts
 - Owner positioning the GitHub profile as AI & DevOps Architect (low-latency execution engines).
@@ -73,6 +99,9 @@ _Last updated: 2026-06-27_
     close, tightens near boundary, exponential backoff on no-rates). Worst-case bar detection ~2s→~0.1s.
   - `orb/brokerstate.py` `BrokerStateCache`: background `run_in_executor` refresh of balance/positions;
     `on_bar` reads the snapshot (was 2 blocking IPC calls/bar). Writes left synchronous.
+    **(Correction, 2026-07-04: this file does not exist in the working tree — the change was staged
+    in a since-dropped `git stash` and never landed. The 273-test figure below reflects that stash,
+    not code on disk. Treat as historical record of intent, not current state.)**
   - ThreadPoolExecutor parallel position routing — documented in README only (touches live orders).
 - **Verify:** `pytest -q` → **273 passing** (+6 new: 4 brokerstate, 2 feed). flake8 critical = 0;
   new code flake8/black clean. No live trading code path semantics changed.
@@ -189,7 +218,6 @@ _Last updated: 2026-06-27_
 - `scripts/backtest_symbols.py`, window 2026-03-03..06-12, US100 (spread 1.0pt, comm 0, qty 0.80):
   baseline PF **1.87** (+$5,147, maxDD $199) · deadzone PF **1.93** (+$3,239) · LIVE dz+q2q3 PF
   **1.85** (+$1,954, maxDD $111). **US100 = best of 4 symbols** (XAUUSD 1.51, US500 1.50, XAGUSD 1.04).
->>>>>>> Stashed changes
 
 ## 2026-06-21 (pm 5) — Institutional filter/risk layer added to SVP ("spike momentum setup") (D-022)
 - Owner asked to add trend filters + risk management to the SVP edge-rotation strategy (fix the

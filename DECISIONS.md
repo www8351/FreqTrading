@@ -1,5 +1,60 @@
 # DECISIONS
 
+## D-028 — Production execution layer + copy-trade broadcast (Part 2, flag-gated, default off)
+- **Date:** 2026-07-04
+- **Context:** Owner spec §4-6 (companion to the Part 1 SMC build, D-027): dynamic spread gate,
+  strict slippage tolerance, dynamic JustMarkets symbol resolution, London/NY session filter,
+  exhaustive MT5 retcode handling with backoff, non-blocking copy-trade broadcast to a leader node,
+  verbose logging, equity sizing. No live copy-trading backend existed on this machine
+  (`Miror_Copy_Trades` = post-trade analytics only, no live ingest) — owner chose to also ship a
+  minimal standalone leader node here rather than target an external system.
+- **Decided / built (all additive, off by default, ORB/SVP/SMC live behavior byte-unchanged):**
+  - `orb/tradeevents.py` (`TradeEvent`/`build_event`/`to_payload`/`TradeEventLog`/`EventHub`),
+    `orb/broker/retcodes.py` (per-retcode policy table + `RetryPolicy` exponential backoff +
+    ambiguous-failure double-fill guard via position re-query), `orb/execguard.py` (`SpreadGate`,
+    `SessionGate`/`parse_killzones`, `assess_fill` R:R-degradation check), `orb/symbols.py`
+    (`resolve_symbol` — scans `symbols_get()` for JustMarkets suffix variants), `orb/broadcast.py`
+    (HMAC-signed, non-blocking thread+queue publisher with disk spool-on-failure), `leader/` sidecar
+    (stdlib `http.server` REST ingest + optional ZeroMQ PUB, mirrors the `macro/` sidecar pattern of
+    D-013 — may use deps; `orb/` itself stays stdlib-only per D-002).
+  - `orb/broker/mt5.py`: `on_event`/`strategy` ctor kwargs (event emission from the semantic
+    wrappers — `_open`/`_open_limit`/`_close_position`/`modify_sl`/`update_stop`/`cancel_*` — never
+    from `_send`, so an event-sink failure can never break an order); `current_spread()`;
+    `deal_profit()`; `retry: RetryPolicy | None` (default `None` = today's single-send behavior,
+    byte-identical exception text).
+  - `orb/cli.py` live-mode flags (all default off): `--max-spread`, `--killzones`,
+    `--resolve-symbol`, `--retry-policy on|off` + `--max-retries`, `--max-slippage` +
+    `--slippage-policy keep|close`, `--rr-floor`, `--risk-pct` (ORB equity sizing, reuses
+    `compute_lot` from the SVP module), `--max-consec-losses` (wires the previously-orphaned
+    `ConsecutiveLossGuard`), `--trade-log`, `--broadcast` + `--broadcast-spool`.
+  - `docs/copytrade_schema.md`: the JSON payload contract (schema_version 1) shared by the trade
+    log, the broadcast wire format, and the leader store — written so Part 1's `mql5/SmcXau_EA.mq5`
+    can implement the identical contract on its `WebRequest` side.
+- **Bug found + fixed in existing code (not new scope):** a stray function-local `import dataclasses`
+  inside `on_signal` (pre-existing, serving the macro qty-scale branch) shadowed the module-level
+  import for the WHOLE function due to Python's scoping rule, breaking the new ORB risk-pct
+  `dataclasses.replace` call that now runs earlier in the same function. Removed the redundant local
+  import (module-level import already covers it) — zero behavior change to the macro branch.
+- **Rejected:** FastAPI/sqlite for the leader node (first mandatory third-party runtime dep for a
+  handful of events/minute — stdlib `http.server` + JSONL is sufficient and dependency-free);
+  emitting trade events from `cli.py` after `broker.execute()` (misses babysitter partials/trail
+  updates and limit-mode's second leg — the broker's semantic wrappers are the only point where
+  ticket + actual fill + request coexist).
+- **Verified:** 588 tests green (445 SMC baseline + 143 new). No behavior change with flags off —
+  pinned by `test_no_new_flags_on_signal_path_unchanged` (spy-broker call-sequence match).
+- **Status:** feature-complete, staged/uncommitted for owner review. `scripts/bots.ps1` untouched —
+  enabling any Part 2 feature on the live XAUUSD/US100 bots is a separate, explicit owner action.
+  Adversarial review completed (2026-07-04, manual after two agent-dispatch failures): gate chain
+  confirmed inert when flags off, `Broadcaster`/`_emit` verified non-blocking with bounded
+  `close()`, double-fill recovery checked race-free (single-threaded, magic-scoped, pre-send
+  snapshot), `assess_fill` R:R math confirmed direction-agnostic (abs()-based), slippage→deviation
+  unit conversion verified, HMAC uses `compare_digest` with signature-before-timestamp ordering,
+  secret is env-only, `orb/*` confirmed stdlib-only, `pyzmq` confirmed lazy-imported. No defects found.
+  **Independently corroborated** by a second, separately-dispatched review pass reaching the same
+  verdict across all six categories; it added one informational (non-defect) note — double-fill
+  ticket recovery matches on symbol+magic only, not also volume/price/time, which is acceptable
+  because each engine instance owns a unique magic and issues one signal path at a time.
+
 ## D-027 — SMC A+ multi-timeframe system as a standalone strategy (built, armed, honest negative edge)
 - **Date:** 2026-07-04
 - **Context:** Goal `/alter review` — owner asked for a precision, low-frequency SMC/ICT XAUUSD system
@@ -38,8 +93,6 @@
 - **Status:** feature-complete, **445 tests green**, staged/uncommitted for owner review. Revisitable
   only with a structurally different signal or instrument (the overfit/tuning path is exhausted, D-020).
 
-<<<<<<< Updated upstream
-=======
 ## D-026 — Public packaging is strictly accurate: low-latency execution engine, no ML/profit claims
 - **Date:** 2026-06-27
 - **Context:** Owner is positioning their GitHub profile as an AI & DevOps Architect (HA MLOps,
@@ -121,7 +174,6 @@
   change; ORB live bots untouched and healthy. Rejected: deleting `data/` (regenerable but useful);
   rewriting historical doc refs (violates lifecycle append-only timeline).
 
->>>>>>> Stashed changes
 ## D-022 — Institutional filter/risk layer on SVP; caps drawdown, does NOT create edge
 - **Date:** 2026-06-21
 - **Context:** Owner asked to add trend filtering + risk management to the SVP edge-rotation

@@ -334,6 +334,15 @@ def cmd_live(args) -> int:
         breaker = DailyLossBreaker(args.max_daily_loss)
         print(f"# daily loss breaker: ${args.max_daily_loss}", file=sys.stderr)
 
+    consec = None
+    if getattr(args, "max_consec_losses", 0):
+        from .riskguard import ConsecutiveLossGuard
+
+        consec = ConsecutiveLossGuard(args.max_consec_losses)
+        print(f"# consec-loss guard: entries halt after "
+              f"{args.max_consec_losses} straight losing closes (daily reset)",
+              file=sys.stderr)
+
     spike = None
     if args.spike_cancel:
         from .riskguard import SpikeCancel
@@ -359,6 +368,30 @@ def cmd_live(args) -> int:
         print(f"# quarter-filter: entries only in day {'+'.join(allowed)} "
               f"(NY 6h cycle: Q2=London Q3=AM)", file=sys.stderr)
 
+    killzones = None
+    if getattr(args, "killzones", None):
+        from .execguard import SessionGate, parse_killzones
+
+        try:
+            killzones = SessionGate(parse_killzones(args.killzones))
+        except ValueError as e:
+            print(f"FATAL | {e}", file=sys.stderr)
+            return 2
+        print(f"# killzones: entries only inside {args.killzones} UTC "
+              f"(fixed UTC, no DST tracking)", file=sys.stderr)
+
+    spread_gate = None
+    if getattr(args, "max_spread", None) is not None:
+        from .execguard import SpreadGate
+
+        try:
+            spread_gate = SpreadGate(args.max_spread)
+        except ValueError as e:
+            print(f"FATAL | {e}", file=sys.stderr)
+            return 2
+        print(f"# spread-gate: entries skipped while spread > "
+              f"{args.max_spread}", file=sys.stderr)
+
     macro = None
     macro_mode = getattr(args, "macro_mode", "off")
     if macro_mode != "off":
@@ -375,11 +408,71 @@ def cmd_live(args) -> int:
               f"asset={macro.asset_key}", file=sys.stderr)
     _macro_ro = {"on": False}   # risk-off fire-once latch (guard mode)
 
+    # ---- Part 2 event pipeline: one hub fans every broker action out to the
+    # configured sinks (JSONL trade log / copy-trade broadcaster / consec-loss
+    # guard). No consumer -> no hub -> broker on_event=None (zero overhead).
+    hub = None
+    bcaster = None
+    if getattr(args, "trade_log", None) or getattr(args, "broadcast", None) \
+            or consec is not None:
+        from .tradeevents import EventHub, TradeEventLog, to_payload
+
+        hub = EventHub()
+        if getattr(args, "trade_log", None):
+            hub.add(TradeEventLog(args.trade_log).write)
+            print(f"# trade-log: {args.trade_log}", file=sys.stderr)
+        if getattr(args, "broadcast", None):
+            secret = os.environ.get("COPYTRADE_SECRET")
+            if not secret:
+                print("FATAL | --broadcast requires COPYTRADE_SECRET in the "
+                      "environment (never pass the secret as a CLI arg)",
+                      file=sys.stderr)
+                return 2
+            from .broadcast import Broadcaster
+
+            bcaster = Broadcaster(args.broadcast, secret.encode(),
+                                  spool_path=args.broadcast_spool)
+            hub.add(lambda ev: bcaster.publish(to_payload(ev)))
+            print(f"# broadcast: {args.broadcast} "
+                  f"spool={args.broadcast_spool}", file=sys.stderr)
+        if consec is not None:
+            def _consec_sink(ev):
+                if ev.action in ("close", "partial_close") \
+                        and ev.pnl is not None:
+                    consec.record(ev.pnl)
+            hub.add(_consec_sink)
+
     broker = None
     state = None
     if args.broker == "mt5":
         from .broker import Mt5Broker
         from .brokerstate import BrokerStateCache
+
+        if getattr(args, "resolve_symbol", False):
+            import MetaTrader5 as _mt5  # noqa: N816 — scan needs a live handle
+
+            from .symbols import SymbolResolveError, resolve_symbol
+
+            if not _mt5.initialize():
+                print(f"FATAL | mt5.initialize failed: {_mt5.last_error()}",
+                      file=sys.stderr)
+                return 2
+            try:
+                resolved = resolve_symbol(_mt5, args.symbol)
+            except SymbolResolveError as e:
+                print(f"FATAL | {e}", file=sys.stderr)
+                return 2
+            print(f"# symbol_resolved {args.symbol} -> {resolved}",
+                  file=sys.stderr)
+            args.symbol = resolved
+
+        retry = None
+        if getattr(args, "retry_policy", "off") == "on":
+            from .broker.retcodes import RetryPolicy
+
+            retry = RetryPolicy(max_retries=args.max_retries)
+            print(f"# retry-policy: on max_retries={args.max_retries}",
+                  file=sys.stderr)
 
         if is_smc:
             _magic = SMC_MAGIC
@@ -395,13 +488,28 @@ def cmd_live(args) -> int:
                            server_tp=False if (is_svp or is_smc)
                            else (cfg.tp_close_frac >= 1.0),
                            entry_mode="market" if (is_svp or is_smc)
-                           else args.entry)
+                           else args.entry,
+                           on_event=hub.emit if hub is not None else None,
+                           strategy=strategy,
+                           retry=retry)
         info = broker.connect()
         # Background cache: keep blocking balance/positions IPC off the candle
         # hot path; on_bar reads the snapshot, falling back while it is cold.
         state = BrokerStateCache(broker)
         print(f"# broker mt5 {info} magic={broker.magic} "
               f"strategy={strategy}", file=sys.stderr)
+        if getattr(args, "max_slippage", None) is not None:
+            # server-side hard cap: deviation (points) = max_slippage / point
+            _pt = getattr(broker._mt5.symbol_info(args.symbol),
+                          "point", 0.0) or 0.0
+            if _pt > 0:
+                broker.deviation = int(round(args.max_slippage / _pt))
+                print(f"# max-slippage: {args.max_slippage} -> "
+                      f"deviation={broker.deviation} points", file=sys.stderr)
+            else:
+                print(f"# max-slippage: {args.max_slippage} but symbol point "
+                      f"unknown; keeping deviation={broker.deviation}",
+                      file=sys.stderr)
 
     def on_transition(tr):
         if not args.quiet:
@@ -417,6 +525,11 @@ def cmd_live(args) -> int:
         if breaker is not None and breaker.halted and sig.kind is SignalKind.ENTRY:
             print("# HALTED daily loss limit: entry skipped", file=sys.stderr)
             return
+        if consec is not None and consec.blocked \
+                and sig.kind is SignalKind.ENTRY:
+            print(f"# CONSEC_SKIP {consec.streak} straight losses: entry "
+                  f"skipped until next UTC day", file=sys.stderr)
+            return
         if trueopen is not None and sig.kind is SignalKind.ENTRY \
                 and trueopen.zone(sig.price) == "dead_zone":
             # engine stays BREAKOUT but no order exists; the on_bar sync
@@ -431,6 +544,11 @@ def cmd_live(args) -> int:
                 print(f"# QUARTER_SKIP {q}: entry skipped (allowed "
                       f"{'+'.join(allowed)})", file=sys.stderr)
                 return
+        if killzones is not None and sig.kind is SignalKind.ENTRY \
+                and not killzones.allows(sig.ts):
+            print(f"# KILLZONE_SKIP {sig.ts:%H:%M}: entry skipped (windows "
+                  f"{args.killzones} UTC)", file=sys.stderr)
+            return
         if macro is not None and sig.kind is SignalKind.ENTRY:
             dec = macro.evaluate_entry(sig)
             if dec.action == "VETO":
@@ -442,7 +560,6 @@ def cmd_live(args) -> int:
             elif dec.qty is not None and sig.qty is not None \
                     and abs(dec.qty - sig.qty) > 1e-9:
                 if macro_mode in ("filter", "guard"):
-                    import dataclasses
                     print(f"# MACRO_SCALE qty {sig.qty}->{dec.qty} ({dec.reason})",
                           file=sys.stderr)
                     sig = dataclasses.replace(sig, qty=dec.qty)
@@ -476,12 +593,79 @@ def cmd_live(args) -> int:
             sig = dataclasses.replace(sig, qty=lot)
             print(f"# {tag}_SIZE lot={lot} risk={risk_pct}% "
                   f"stop_dist={stop_dist:.{dp}f}", file=sys.stderr)
+        if not (is_svp or is_smc) and sig.kind is SignalKind.ENTRY \
+                and getattr(args, "risk_pct", None) is not None:
+            # ORB equity sizing (clone of the SVP block above): lot so the
+            # loss at the signal stop is risk_pct of balance, capped to the
+            # remaining daily budget. Flag default None keeps fixed --qty.
+            if sig.stop is None:
+                print("# ORB_SKIP no stop on signal", file=sys.stderr)
+                return
+            specs = broker.symbol_specs()
+            bal = broker.balance()
+            remaining = None
+            if breaker is not None:
+                remaining = max(0.0, breaker.max_daily_loss + breaker.day_pnl)
+            lot = compute_lot(bal, args.risk_pct, sig.price, sig.stop,
+                              specs["value_per_move"], specs["volume_min"],
+                              specs["volume_step"], specs["volume_max"],
+                              max_risk=remaining)
+            stop_dist = abs(sig.price - sig.stop)
+            if lot <= 0:
+                print(f"# ORB_SKIP lot=0 stop_dist={stop_dist:.{dp}f} "
+                      f"bal={bal} budget={remaining}", file=sys.stderr)
+                return
+            sig = dataclasses.replace(sig, qty=lot)
+            print(f"# ORB_SIZE lot={lot} risk={args.risk_pct}% "
+                  f"stop_dist={stop_dist:.{dp}f}", file=sys.stderr)
+        if spread_gate is not None and sig.kind is SignalKind.ENTRY:
+            # freshest tick, checked IMMEDIATELY before the order goes out
+            try:
+                tick = broker.current_spread()
+            except OrbError as e:
+                print(f"SPREAD_FAIL | {e}: entry skipped", file=sys.stderr)
+                return
+            allowed_sp, spread = spread_gate.allows(tick["bid"], tick["ask"])
+            if not allowed_sp:
+                print(f"# SPREAD_SKIP spread={spread} "
+                      f"max={spread_gate.max_spread}: entry skipped",
+                      file=sys.stderr)
+                return
         try:
             res = broker.execute(sig)
             if res is not None:
                 print(f"# order {res}", file=sys.stderr)
         except OrbError as e:
             print(f"ORDER_FAIL | {e}", file=sys.stderr)
+            return
+        if (sig.kind is SignalKind.ENTRY and res is not None
+                and broker.entry_mode == "market" and res.get("price")
+                and (getattr(args, "max_slippage", None) is not None
+                     or getattr(args, "rr_floor", None) is not None)):
+            # post-fill R:R verification against the ORIGINAL signal levels:
+            # the broker re-anchors SL/TP around the fill (risk distance kept)
+            # so slippage shows up here as achieved-R:R degradation.
+            from .execguard import assess_fill
+
+            fa = assess_fill(sig.price, float(res["price"]), sig.stop,
+                             sig.tp, max_slippage=args.max_slippage,
+                             rr_floor=args.rr_floor)
+            print(f"# FILL slippage={fa.slippage} "
+                  f"rr_planned={_fmt_num(fa.rr_planned, 2)} "
+                  f"rr_achieved={_fmt_num(fa.rr_achieved, 2)} "
+                  f"risk_inflation_r={_fmt_num(fa.risk_inflation_r, 3)}",
+                  file=sys.stderr)
+            if fa.breach or fa.degraded:
+                why = "slippage" if fa.breach else "rr_floor"
+                policy = getattr(args, "slippage_policy", "keep")
+                print(f"# ALERT {why}_breach slippage={fa.slippage} "
+                      f"rr_achieved={_fmt_num(fa.rr_achieved, 2)} "
+                      f"policy={policy}", file=sys.stderr)
+                if policy == "close":
+                    try:
+                        broker.close_all("slippage_abort")
+                    except OrbError as e:
+                        print(f"ORDER_FAIL | {e}", file=sys.stderr)
 
     if is_svp:
         engine = SvpEngine(svp_cfg, on_transition=on_transition)
@@ -529,6 +713,8 @@ def cmd_live(args) -> int:
         """
         if trueopen is not None:
             trueopen.update(c)
+        if consec is not None:
+            consec.on_period(c.ts.date())  # streak resets on a new UTC day
         if broker is None:
             return
         if spike is not None and spike.update(c.high, c.low) \
@@ -632,8 +818,13 @@ def cmd_live(args) -> int:
     try:
         asyncio.run(_run())
     finally:
+        if bcaster is not None:
+            bcaster.close()
         if broker is not None:
             broker.shutdown()
+        if broker is not None and getattr(broker, "retcode_counts", None):
+            print(f"# retcode_counts {dict(broker.retcode_counts)}",
+                  file=sys.stderr)
     return 0
 
 
@@ -799,6 +990,52 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--macro-conf-min", dest="macro_conf_min", type=float,
                     default=0.6,
                     help="min macro confidence to act on a bias conflict / risk-off")
+    # ---- Part 2 execution layer (all default OFF; see docs/copytrade_schema.md)
+    lp.add_argument("--max-spread", dest="max_spread", type=float,
+                    help="skip entries while the live spread (ask-bid) exceeds "
+                         "this, in price units (gold: 0.4 = 40 cents)")
+    lp.add_argument("--killzones", dest="killzones",
+                    help="UTC entry windows 'HH:MM-HH:MM[,HH:MM-HH:MM]' "
+                         "(e.g. 12:00-16:00 = London/NY overlap); entries "
+                         "outside are skipped. Fixed UTC - no DST tracking")
+    lp.add_argument("--resolve-symbol", dest="resolve_symbol",
+                    action="store_true",
+                    help="resolve --symbol to the broker's actual variant "
+                         "(XAUUSD -> XAUUSD.ecn/.pro/m/...) before connecting")
+    lp.add_argument("--retry-policy", dest="retry_policy",
+                    choices=("off", "on"), default="off",
+                    help="retcode-policy resend loop (fresh-price requotes, "
+                         "exponential backoff, double-fill recovery); "
+                         "off (default) = single-send")
+    lp.add_argument("--max-retries", dest="max_retries", type=int, default=3,
+                    help="retry budget when --retry-policy on (default 3)")
+    lp.add_argument("--max-slippage", dest="max_slippage", type=float,
+                    help="slippage tolerance in price units: sets the order "
+                         "deviation (server-side cap) and flags post-fill "
+                         "breaches against the ORIGINAL signal levels")
+    lp.add_argument("--slippage-policy", dest="slippage_policy",
+                    choices=("keep", "close"), default="keep",
+                    help="on a post-fill slippage/R:R breach: keep the "
+                         "position and alert (default) or close it immediately")
+    lp.add_argument("--rr-floor", dest="rr_floor", type=float,
+                    help="minimum achieved R:R at the actual fill price; "
+                         "below it the slippage policy fires")
+    lp.add_argument("--risk-pct", dest="risk_pct", type=float,
+                    help="ORB equity sizing: lot so the loss at the signal "
+                         "stop is this %% of balance (default: fixed --qty)")
+    lp.add_argument("--max-consec-losses", dest="max_consec_losses", type=int,
+                    default=0,
+                    help="skip new entries after this many consecutive losing "
+                         "closes in a UTC day (0 = off)")
+    lp.add_argument("--trade-log", dest="trade_log",
+                    help="append schema-v1 trade events to this JSONL file")
+    lp.add_argument("--broadcast", dest="broadcast",
+                    help="POST trade events to this leader-node URL "
+                         "(secret from env COPYTRADE_SECRET, never a flag)")
+    lp.add_argument("--broadcast-spool", dest="broadcast_spool",
+                    default="broadcast_spool.jsonl",
+                    help="offline spool for unsent broadcasts (default "
+                         "broadcast_spool.jsonl)")
     _add_common(lp)
     lp.set_defaults(func=cmd_live)
 
