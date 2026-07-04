@@ -26,8 +26,8 @@ SYMBOLS = {
                    stop_min=2.0, stop_max=4.0, spread=0.20, comm=7.0, qty=0.06,
                    daily=110.0),
     "US100":  dict(glob="data/us100_1m_20260303_*.csv", value=1.0,
-                   stop_min=15.0, stop_max=30.0, spread=1.0, comm=0.0, qty=0.80,
-                   daily=60.0),
+                   stop_min=15.0, stop_max=30.0, spread=0.6, comm=0.0, qty=0.80,
+                   daily=60.0),  # spread = real measured median 0.6pt (D-025)
     "US500":  dict(glob="data/us500_1m_20260303_*.csv", value=1.0,
                    stop_min=2.5, stop_max=5.0, spread=0.25, comm=0.0, qty=4.80,
                    daily=60.0),

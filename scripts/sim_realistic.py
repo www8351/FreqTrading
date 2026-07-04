@@ -241,22 +241,29 @@ def aggregate_candles(candles: list[Candle], minutes: int) -> list[Candle]:
     return out
 
 
-def run(candles: list[Candle], qty: float, spread: float, comm: float,
-        max_daily_loss: float = 110.0, stop_min: float = 2.0,
-        stop_max: float = 4.0, value_per_move: float = USD_PER_LOT_PER_DOLLAR
-        ) -> list[dict]:
-    cfg = OrbConfig(
+def _orb_cfg(candles: list[Candle], qty: float, stop_min: float, stop_max: float,
+             roc_min: float, tp_rrr: float, tp_close_frac: float) -> OrbConfig:
+    return OrbConfig(
         session_open_utc=candles[0].ts.time().replace(second=0, microsecond=0),
-        session_len_min=1440, roc_min=0.15,
+        session_len_min=1440, roc_min=roc_min,
         stop_max_dist=stop_max, stop_min_dist=stop_min,
-        tp_rrr=2.0, tp_close_frac=0.7, qty=qty,
+        tp_rrr=tp_rrr, tp_close_frac=tp_close_frac, qty=qty,
         one_trade_per_session=False, rearm_after_exit=True,
         rearm_range="rebuild",
     )
+
+
+def run(candles: list[Candle], qty: float, spread: float, comm: float,
+        max_daily_loss: float = 110.0, stop_min: float = 2.0,
+        stop_max: float = 4.0, value_per_move: float = USD_PER_LOT_PER_DOLLAR,
+        roc_min: float = 0.15, tp_rrr: float = 2.0, tp_close_frac: float = 0.7,
+        partial_frac: float = 0.7, partial_at_r: float = 2.0,
+        spike_ratio: float = 2.5) -> list[dict]:
+    cfg = _orb_cfg(candles, qty, stop_min, stop_max, roc_min, tp_rrr, tp_close_frac)
     engine = OrbEngine(cfg)
     sim = Sim(qty, spread, comm, value_per_move)
-    sitter = Babysitter(partial_frac=0.7, partial_at_r=2.0)
-    spike = SpikeCancel(ratio=2.5)
+    sitter = Babysitter(partial_frac=partial_frac, partial_at_r=partial_at_r)
+    spike = SpikeCancel(ratio=spike_ratio)
     breaker = DailyLossBreaker(max_daily_loss)
     topen = TrueOpenTracker()
     qtr = QuarterTracker()

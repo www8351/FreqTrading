@@ -27,16 +27,15 @@ $common = "--broker mt5 --entry limit --roc-min 0.15 --spike-cancel 2.5 " +
           "--tp-rrr 2 --session-len 1440 --rearm --rearm-range rebuild " +
           "--trueopen-filter deadzone --log-level INFO"
 
-# ENABLED universe = XAUUSD + US100 (Nasdaq) only. Launched with NO --macro-mode (macro off).
+# ENABLED universe = US100 (Nasdaq) ONLY. 24h owner watch on the validated PF-2.23 setup (2026-06-23).
+# Launched with NO --macro-mode (macro off).
 $ENABLED = @(
-  @{ sym = 'XAUUSD.ecn'; out = 'live_signals.log'; err = 'live_engine.log';
-     args = "-m orb live --source orb.feeds.mt5feed:xauusd_live --symbol XAUUSD.ecn " +
-            "--qty 0.04 --stop-min 2.6 --stop-max 5.2 --max-daily-loss 110 $common" },
   @{ sym = 'US100.ecn'; out = 'live_us100_signals.log'; err = 'live_us100_engine.log';
      args = "-m orb live --source orb.feeds.mt5feed:us100_live --symbol US100.ecn " +
-            "--qty 0.40 --stop-min 15 --stop-max 30 --max-daily-loss 60 --quarter-filter q2q3 $common" }
+            "--qty 0.60 --stop-min 15 --stop-max 30 --max-daily-loss 60 --quarter-filter q2q3 $common" }
 )
 # DISABLED (kept for easy re-enable - do NOT launch unless you add them back to $ENABLED):
+#  XAUUSD.ecn: --source orb.feeds.mt5feed:xauusd_live --symbol XAUUSD.ecn --qty 0.04 --stop-min 2.6  --stop-max 5.2  --max-daily-loss 110 $common   (no-edge D-020; parked for US100-only 24h watch)
 #  US500.ecn : --source orb.feeds.mt5feed:us500_live  --symbol US500.ecn  --qty 1.5  --stop-min 4    --stop-max 8    --max-daily-loss 60 --quarter-filter q2q3 $common
 #  XAGUSD.ecn: --source orb.feeds.mt5feed:xagusd_live --symbol XAGUSD.ecn --qty 0.01 --stop-min 0.10 --stop-max 0.20 --max-daily-loss 60 --quarter-filter q2q3 $common
 

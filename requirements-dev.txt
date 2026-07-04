@@ -1,0 +1,10 @@
+# Development / CI dependencies (superset of runtime).
+-r requirements.txt
+
+# Test suite
+pytest>=8
+pytest-asyncio>=0.23
+
+# Lint / format (enforced by .github/workflows/ci.yml)
+flake8>=7
+black>=24

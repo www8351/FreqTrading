@@ -1,0 +1,9 @@
+# Runtime dependencies.
+#
+# The engine, feeds, risk guards and macro layer are pure Python standard
+# library — they import and run on any platform with no third-party packages.
+# The ONLY runtime dependency is the MetaTrader 5 Python bridge, which is
+# Windows-only and lazily imported (orb/broker/mt5.py, orb/feeds/mt5feed.py).
+# The env-marker lets `pip install -r requirements.txt` succeed on Linux/macOS
+# (and in CI) while still installing the bridge on Windows.
+MetaTrader5>=5.0 ; platform_system == "Windows"
