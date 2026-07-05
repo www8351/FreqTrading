@@ -10,11 +10,14 @@ from orb.smc.config import SmcConfig
 
 def test_defaults_construct():
     cfg = SmcConfig()
-    assert cfg.trigger_tf_min == 15
+    assert cfg.trigger_tf_min == 30
     assert cfg.htf_min == 240
     assert cfg.d1_min == 1440
     assert cfg.partial_levels == ((5.0, 0.40), (7.0, 0.30))
-    assert cfg.trail_mode == "swing"
+    assert cfg.stage1_at_r == 1.0
+    assert cfg.stage2_at_r == 2.0
+    assert cfg.stage2_min_lock_r == 1.0
+    assert cfg.comm_per_lot == 7.0
 
 
 def test_magic():
@@ -55,8 +58,6 @@ def test_frozen():
     {"poc_tol": -1.0},
     {"disp_atr_mult": 0.0},
     {"vol_mult": 0.0},
-    {"trail_atr_mult": 0.0},
-    {"trail_buffer": -0.1},
     # disp_body_frac in (0, 1) exclusive
     {"disp_body_frac": 0.0},
     {"disp_body_frac": 1.0},
@@ -65,9 +66,6 @@ def test_frozen():
     {"risk_pct": 0.0},
     {"risk_pct": 10.5},
     {"risk_pct": -1.0},
-    # trail_mode enum
-    {"trail_mode": "fixed"},
-    {"trail_mode": ""},
     # timeframe ordering / d1 fixed
     {"trigger_tf_min": 240},                     # trigger !< htf
     {"htf_min": 1440},                           # htf !< d1
@@ -86,11 +84,14 @@ def test_frozen():
     {"final_tp_r": 7.0},                          # == last partial r
     {"final_tp_r": 6.0},                          # < last partial r
     {"final_tp_r": -1.0},                         # negative
-    # be_at_r / trail_start_r > 0
-    {"be_at_r": 0.0},
-    {"be_at_r": -1.0},
-    {"trail_start_r": 0.0},
-    {"trail_start_r": -0.5},
+    # stage1_at_r > 0, stage2_at_r > stage1_at_r, stage2_min_lock_r > 0
+    {"stage1_at_r": 0.0},
+    {"stage1_at_r": -1.0},
+    {"stage2_at_r": 1.0},                          # == stage1_at_r
+    {"stage2_at_r": 0.5},                           # < stage1_at_r
+    {"stage2_min_lock_r": 0.0},
+    {"stage2_min_lock_r": -0.5},
+    {"comm_per_lot": -1.0},
     # stop_max_dist > stop_buffer > 0
     {"stop_buffer": 0.0},
     {"stop_buffer": -0.5},
@@ -112,11 +113,11 @@ def test_invalid_raises(kw):
     {"partial_levels": ()},                                  # no partials is legal
     {"partial_levels": (), "final_tp_r": 0.5},               # any r>0 with no partials
     {"partial_levels": ((2.0, 0.5), (4.0, 0.5))},            # fracs sum == 1.0
-    {"trail_mode": "atr"},
-    {"trail_start_r": 1.0, "be_at_r": 2.0},                  # independent, both > 0
+    {"stage1_at_r": 1.0, "stage2_at_r": 2.0},                # independent, both valid
+    {"stage2_min_lock_r": 5.0},                              # any > 0 is legal
+    {"comm_per_lot": 0.0},                                   # 0 is legal (no cost)
     {"min_confluences": 1},
     {"min_confluences": 6},
-    {"trail_buffer": 0.0},
     {"poc_tol": 0.0},
 ])
 def test_valid_edges(kw):

@@ -18,7 +18,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 
 from .engine import OrbEngine
 from .models import (Candle, CandleError, OrbConfig, OrbError, OutOfOrderError,
@@ -189,6 +189,28 @@ def build_svp_config(args) -> SvpConfig:
     return SvpConfig(**base)
 
 
+def _utcnow() -> datetime:
+    """Wall clock for the warmup gate; module-level so tests can pin it."""
+    return datetime.now(timezone.utc)
+
+
+def _stale(ts: datetime, start: datetime, grace: timedelta) -> bool:
+    """True when ``ts`` predates process ``start`` by more than ``grace``."""
+    return ts < start - grace
+
+
+def _warmup_graces(is_smc: bool, trigger_tf_min: int) -> tuple[timedelta, timedelta]:
+    """(bar_grace, sig_grace) for the warmup gate.
+
+    Bars are M1 -> 3 min covers feed latency. Signal.ts is the TRIGGER-TF bar
+    OPEN time, so a perfectly live smc signal can be ~trigger_tf_min old —
+    only signals whose decision bar closed >= ~2 min before launch are stale.
+    """
+    bar = timedelta(minutes=3)
+    sig = timedelta(minutes=(trigger_tf_min if is_smc else 1) + 2)
+    return bar, sig
+
+
 def build_smc_config(args) -> SmcConfig:
     """Assemble an SmcConfig from --smc-* flags (only used with --strategy smc)."""
     base: dict = {}
@@ -203,8 +225,13 @@ def build_smc_config(args) -> SmcConfig:
     setif("poc_tol", getattr(args, "smc_poc_tol", None))
     setif("stop_max_dist", getattr(args, "smc_stop_max_dist", None))
     setif("max_trades_per_day", getattr(args, "smc_max_trades_per_day", None))
-    setif("trail_mode", getattr(args, "smc_trail_mode", None))
     setif("final_tp_r", getattr(args, "smc_final_tp_r", None))
+    setif("stage1_at_r", getattr(args, "smc_stage1_at_r", None))
+    setif("stage2_at_r", getattr(args, "smc_stage2_at_r", None))
+    setif("stage2_min_lock_r", getattr(args, "smc_stage2_min_lock_r", None))
+    setif("comm_per_lot", getattr(args, "smc_comm_per_lot", None))
+    setif("stop_buffer", getattr(args, "smc_stop_buffer", None))
+    setif("ticks_per_row", getattr(args, "smc_ticks_per_row", None))
     return SmcConfig(**base)
 
 
@@ -511,11 +538,32 @@ def cmd_live(args) -> int:
                       f"unknown; keeping deviation={broker.deviation}",
                       file=sys.stderr)
 
+    # --warmup-gate: while the feed replays history (warmup feeds like
+    # mt5feed:btcusd_live), engine state builds but nothing may reach the
+    # broker — a stale ENTRY would fire a live order at a historical price,
+    # and stale bars would drive SL modifications on real positions.
+    warm_start = _utcnow()
+    _bar_grace, _sig_grace = _warmup_graces(
+        is_smc, smc_cfg.trigger_tf_min if is_smc else 0)
+    warm = {"on": bool(getattr(args, "warmup_gate", False)),
+            "bars": 0, "sigs": 0}
+    if warm["on"]:
+        print(f"# warmup-gate: broker actions suppressed for candles older "
+              f"than {warm_start - _bar_grace:%Y-%m-%d %H:%M}Z "
+              f"(signal grace {int(_sig_grace.total_seconds() // 60)}min)",
+              file=sys.stderr)
+
     def on_transition(tr):
         if not args.quiet:
             print(fmt_transition(tr, dp), file=sys.stderr)
 
     def on_signal(sig: Signal):
+        if warm["on"] and _stale(sig.ts, warm_start, _sig_grace):
+            # ALL kinds suppressed (EXIT would market-close real positions);
+            # stderr only, so the stdout signals log stays tradable-only.
+            warm["sigs"] += 1
+            print(f"# WARMUP_SIG {fmt_signal(sig, dp)}", file=sys.stderr)
+            return
         print(signal_json(sig) if args.json else fmt_signal(sig, dp))
         sys.stdout.flush()
         if broker is None:
@@ -679,17 +727,26 @@ def cmd_live(args) -> int:
         if is_smc:
             from .smc.exits import LadderExitManager
 
+            specs0 = broker.symbol_specs()
+
+            def _live_spread() -> float:
+                try:
+                    return broker.current_spread()["spread"]
+                except OrbError:
+                    return smc_cfg.stop_buffer  # conservative fallback
+
             sitter = LadderExitManager(
                 partial_levels=smc_cfg.partial_levels,
-                final_tp_r=smc_cfg.final_tp_r, be_at_r=smc_cfg.be_at_r,
-                trail_start_r=smc_cfg.trail_start_r, trail_mode=smc_cfg.trail_mode,
-                trail_atr_mult=smc_cfg.trail_atr_mult,
-                trail_buffer=smc_cfg.trail_buffer,
-                swing_lookback=smc_cfg.swing_lookback, atr_period=smc_cfg.atr_period,
-                trail_tf_min=smc_cfg.trigger_tf_min)
+                final_tp_r=smc_cfg.final_tp_r,
+                stage1_at_r=smc_cfg.stage1_at_r, stage2_at_r=smc_cfg.stage2_at_r,
+                stage2_min_lock_r=smc_cfg.stage2_min_lock_r,
+                stage2_buffer=smc_cfg.stop_buffer,
+                comm_per_lot=smc_cfg.comm_per_lot,
+                value_per_move=specs0["value_per_move"], spread_fn=_live_spread,
+                vol_min=specs0["volume_min"], vol_step=specs0["volume_step"])
             print(f"# ladder exits: partials {smc_cfg.partial_levels} "
-                  f"final={smc_cfg.final_tp_r}R be={smc_cfg.be_at_r}R "
-                  f"trail={smc_cfg.trail_mode}@{smc_cfg.trail_start_r}R",
+                  f"final={smc_cfg.final_tp_r}R stage1={smc_cfg.stage1_at_r}R "
+                  f"stage2={smc_cfg.stage2_at_r}R(min_lock={smc_cfg.stage2_min_lock_r}R)",
                   file=sys.stderr)
         else:
             from .babysitter import Babysitter
@@ -715,6 +772,15 @@ def cmd_live(args) -> int:
             trueopen.update(c)
         if consec is not None:
             consec.on_period(c.ts.date())  # streak resets on a new UTC day
+        if warm["on"]:
+            if _stale(c.ts, warm_start, _bar_grace):
+                warm["bars"] += 1
+                if spike is not None:
+                    spike.update(c.high, c.low)  # keep the range average seeded
+                return  # no broker reads/writes during warmup replay
+            warm["on"] = False
+            print(f"# WARMUP_DONE bars={warm['bars']} "
+                  f"suppressed_signals={warm['sigs']}", file=sys.stderr)
         if broker is None:
             return
         if spike is not None and spike.update(c.high, c.low) \
@@ -760,14 +826,12 @@ def cmd_live(args) -> int:
                               f"(>{args.limit_ttl}min)", file=sys.stderr)
                 except OrbError as e:
                     print(f"TTL_FAIL | {e}", file=sys.stderr)
-            # ladder needs the 1m feed to build higher-TF trail context;
-            # Babysitter/svp have no observe() so this is smc-only.
-            if hasattr(sitter, "observe"):
-                sitter.observe(c)
             # babysitter manages every fill: 70% off at +2R, then chase the
-            # remainder with the stop at distance d
+            # remainder with the stop at distance d. LadderExitManager wants
+            # the full closed candle (N+1 confirmation), not just the close.
+            bar_arg = c if getattr(sitter, "SUPPORTS_CANDLE", False) else c.close
             try:
-                for act in sitter.on_bar(state.positions(), c.close):
+                for act in sitter.on_bar(state.positions(), bar_arg):
                     if act.kind == "partial_close":
                         res = broker.close_ticket(act.ticket, act.volume)
                         if res is not None:
@@ -879,12 +943,25 @@ def _add_smc_flags(p) -> None:
                         "(default 15.0)")
     p.add_argument("--smc-max-trades-per-day", dest="smc_max_trades_per_day",
                    type=int, help="SMC max entries per UTC day (default 2)")
-    p.add_argument("--smc-trail-mode", dest="smc_trail_mode",
-                   choices=("swing", "atr"),
-                   help="SMC ladder trail: swing (default) or atr")
     p.add_argument("--smc-final-tp-r", dest="smc_final_tp_r", type=float,
                    help="SMC ladder final take-profit in R; 0 = runner trails out "
                         "(default 10.0)")
+    p.add_argument("--smc-stage1-at-r", dest="smc_stage1_at_r", type=float,
+                   help="SMC stage1 (BE+costs) SL trigger in R (default 1.0)")
+    p.add_argument("--smc-stage2-at-r", dest="smc_stage2_at_r", type=float,
+                   help="SMC stage2 (final profit lock) SL trigger in R (default 2.0)")
+    p.add_argument("--smc-stage2-min-lock-r", dest="smc_stage2_min_lock_r",
+                   type=float,
+                   help="SMC stage2 SL floor in R, never looser (default 1.0)")
+    p.add_argument("--smc-comm-per-lot", dest="smc_comm_per_lot", type=float,
+                   help="SMC $ round-trip commission/lot for the stage1 cost "
+                        "buffer (default 7.0)")
+    p.add_argument("--smc-stop-buffer", dest="smc_stop_buffer", type=float,
+                   help="SMC structural SL buffer beyond the OB extreme, in "
+                        "price units (default 0.5, gold scale; BTC ~40)")
+    p.add_argument("--smc-ticks-per-row", dest="smc_ticks_per_row", type=int,
+                   help="SMC volume-profile ticks per row (default 100 = $1 "
+                        "rows on gold at tick 0.01; BTC ~3000 = $30 rows)")
 
 
 def _add_common(p) -> None:
@@ -971,6 +1048,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "dynamic sizing, ladder exits, magic 20260621)")
     _add_svp_flags(lp)
     _add_smc_flags(lp)
+    lp.add_argument("--warmup-gate", dest="warmup_gate", action="store_true",
+                    help="suppress ALL broker actions while the feed replays "
+                         "history older than process start (use with warmup "
+                         "feeds like orb.feeds.mt5feed:btcusd_live)")
     lp.add_argument("--max-daily-loss", dest="max_daily_loss", type=float,
                     help="halt trading for the rest of the UTC day after losing "
                          "this many account-currency units (e.g. 110)")
