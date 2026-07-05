@@ -1,5 +1,5 @@
 <#
-  bots.ps1 - ORB live-bot keeper + control. Enabled universe: XAUUSD + US100 only.
+  bots.ps1 - ORB live-bot keeper + control. Enabled universe: US100 (ORB) + BTCUSD.ecn (SMC).
   Supersedes scripts/watchdog.ps1 (do not run both - two keepers would duplicate bots).
 
   ON/OFF = the "ORB-Bots-Keeper" Scheduled Task state (Enabled = ON, Disabled = OFF).
@@ -27,12 +27,16 @@ $common = "--broker mt5 --entry limit --roc-min 0.15 --spike-cancel 2.5 " +
           "--tp-rrr 2 --session-len 1440 --rearm --rearm-range rebuild " +
           "--trueopen-filter deadzone --log-level INFO"
 
-# ENABLED universe = US100 (Nasdaq) ONLY. 24h owner watch on the validated PF-2.23 setup (2026-06-23).
+# ENABLED universe = US100 (ORB, Nasdaq) + BTCUSD.ecn (SMC, 24/7, D-030).
 # Launched with NO --macro-mode (macro off).
 $ENABLED = @(
   @{ sym = 'US100.ecn'; out = 'live_us100_signals.log'; err = 'live_us100_engine.log';
      args = "-m orb live --source orb.feeds.mt5feed:us100_live --symbol US100.ecn " +
-            "--qty 0.60 --stop-min 15 --stop-max 30 --max-daily-loss 60 --quarter-filter q2q3 $common" }
+            "--qty 0.60 --stop-min 15 --stop-max 30 --max-daily-loss 60 --quarter-filter q2q3 $common" },
+  @{ sym = 'BTCUSD.ecn'; out = 'live_btcusd_smc_signals.log'; err = 'live_btcusd_smc_engine.log';
+     args = "-m orb live --source orb.feeds.mt5feed:btcusd_live --broker mt5 --strategy smc " +
+            "--symbol BTCUSD.ecn --warmup-gate --smc-stop-max-dist 1500 --smc-poc-tol 60 " +
+            "--smc-stop-buffer 40 --smc-ticks-per-row 3000 --smc-comm-per-lot 0 --log-level INFO" }
 )
 # DISABLED (kept for easy re-enable - do NOT launch unless you add them back to $ENABLED):
 #  XAUUSD.ecn: --source orb.feeds.mt5feed:xauusd_live --symbol XAUUSD.ecn --qty 0.04 --stop-min 2.6  --stop-max 5.2  --max-daily-loss 110 $common   (no-edge D-020; parked for US100-only 24h watch)
