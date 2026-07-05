@@ -1,6 +1,240 @@
 # PROGRESS
 
-## 2026-07-04 (latest) — Part 2: execution layer + copy-trade broadcast, TDD build
+## 2026-07-05 (latest) — SMC symbol x TF grid (XAUUSD/US100/BTCUSD): found+fixed 3 bugs, full results table (D-031)
+- Owner asked to isolate the TF-granularity variable flagged in the M30 re-test (previous entry):
+  rerun the same window at H1/H2/H4/M45/M90, and extend to US100 + BTCUSD with a specific metrics
+  set (starting balance, max daily/weekly DD $+%, trades/day, avg $/trade, total trades, net P&L).
+- **Fetched BTCUSD.ecn M15 base** (`scripts/fetch_mt5_history.py --symbols BTCUSD.ecn --timeframe
+  M15`) → 101266 bars, 2023-08-14 to 2026-07-05 (~2.9yr; shorter than gold/US100's ~4.2yr because
+  crypto trades 24/7 so the same ~100k-bar broker cap covers fewer calendar days).
+- **Extended `scripts/build_higher_tf.py`** `MINUTES` dict with `h1`(60)/`h2`(120)/`h4`(240)
+  (was m30/m45/m90 only). First run produced H1/H2/H4/M90 files with IDENTICAL bar counts across
+  all four TFs per symbol — a red flag caught by just eyeballing the fetch-log line counts.
+- **Root-caused to `aggregate_candles` in `scripts/sim_realistic.py`:** its bucket-floor line only
+  ever adjusted `c.ts.minute`, never the hour (`c.ts.replace(minute=c.ts.minute -
+  c.ts.minute % minutes, ...)`). For any `minutes >= 60`, `minute % minutes == minute` always
+  (minute is 0-59), so the floor became a no-op beyond truncating to `:00` — every `minutes>=60`
+  call degenerated to plain hourly bars regardless of the requested size. Never caught before
+  because the only other caller (`svp --timeframe`) tops out at 15m (`_TF_MINUTES` dict). **Fixed**
+  by flooring on minutes-since-midnight instead (`mins = ts.hour*60+ts.minute; start = mins -
+  mins%minutes`), matching the logic `orb/smc/mtf.py`'s `TimeframeAggregator._bucket` already got
+  right. Verified safe: no test locked in the old behavior (grepped `tests/` for
+  `aggregate_candles` — zero hits), `python -m pytest -q` → 625/625 still green after the change.
+  Rebuilt all M90/H1/H2/H4 CSVs for XAUUSD/US100/BTCUSD — bar counts now correctly scale down
+  monotonically as TF size grows (m30 50011 > m45 33713 > h1 25022 > m90 17417 > h2 13051 > h4 6753
+  for gold, same pattern for the other two symbols).
+- **Second bug caught while building the grid script:** every SMC backtest ever run — including
+  this session's own M30 re-test just prior — used `--spread 1.10`. Checked `DECISIONS.md` D-019:
+  that $1.10 was explicitly **retired** years ago as a misread "10-12 pip" (pip assumed = $0.10,
+  giving $1.00-1.20) once the owner confirmed the real XAUUSD spread is **$0.10**. That correction
+  was applied to SVP but apparently never carried into the SMC harness/CLI habit. Ran
+  `scripts/check_spread.py` live for all 3 symbols: XAUUSD median **$0.09** (matches D-019), US100
+  median **$0.6** (matches the already-established D-025 value), BTCUSD median **$6.0** (first
+  measurement for this symbol — flat min=median=max, flagged as possibly a fixed-spread demo-account
+  artifact rather than real market variability). New grid uses these real values, not $1.10.
+- **Third bug — the actual reason for it:** first full run of the new grid script gave BTCUSD
+  **zero trades on every single timeframe**. Recognized this as the same shape as D-025's "gold
+  stops on US100" bug: `SmcConfig` defaults (`stop_max_dist=15`, `poc_tol=2`, `stop_buffer=0.5`,
+  `ticks_per_row=100`) are calibrated to gold's price/ATR scale (~$4175, ATR_m5 ~2.87) — on a
+  ~$62,000 BTC instrument with ATR_m5 ~61.7, every structural stop is wider than $15, so every
+  setup gets silently rejected as "stop too wide." Confirmed via `scripts/symbol_specs.py`
+  (pulls MT5 contract specs + ATR for all 5 symbols incl. BTCUSD.ecn, already had it in `SYMBOLS`).
+  **Fix:** added `SMC_OVERRIDES` to `scripts/backtest_tf_grid.py` — BTCUSD reuses the owner's own
+  already-established live-deploy calibration from the STATUS 2026-07-05 BTCUSD entry
+  (`stop_max_dist=1500, poc_tol=60, stop_buffer=40, ticks_per_row=3000`), not a fresh guess. US100
+  has no prior SMC calibration anywhere in the repo, so used a first-pass estimate scaled by
+  measured ATR_m5 ratio to gold (14.19/2.87 ≈ 4.94x → stop_max_dist=75/poc_tol=10/
+  stop_buffer=2.5/ticks_per_row=500) — **explicitly flagged as unvalidated** in both the script's
+  own comments and every report of these numbers; unlike BTC's it isn't owner-tested.
+- **New `scripts/backtest_tf_grid.py`:** loops symbol x timeframe, calls `run_smc` directly
+  (bypassing the noisy CLI print/analytics path — also silenced `orb.riskguard`'s
+  `momentum_spike`/`orb.svp.profile`'s `svp_rows_blowup` loggers, which otherwise flood stdout with
+  thousands of lines on a 4yr dataset), computes: n, net $, worst single CALENDAR DAY net (an
+  approximation of "max daily drawdown" — not an intraday peak-to-trough), worst single ISO WEEK
+  net, trades/day (n ÷ distinct days that had ≥1 trade), avg $/trade (net÷n), max single win/loss.
+- **Full results (start balance $1000 every run):**
+
+  | symbol | tf | n | net $ | day DD $ (%) | week DD $ (%) | trades/day | avg $/trade | max win | max loss |
+  |---|---|---|---|---|---|---|---|---|---|
+  | xauusd | m30 | 83 | +830.99 | -48.66 (-4.9%) | -69.08 (-6.9%) | 1.038 | +10.01 | +267.89 | -31.92 |
+  | xauusd | m45 | 78 | +1826.50 | -55.87 (-5.6%) | -68.23 (-6.8%) | 1.026 | +23.42 | +480.10 | -55.87 |
+  | xauusd | m90 | 61 | +123.37 | -24.81 (-2.5%) | -24.81 (-2.5%) | 1.017 | +2.02 | +168.14 | -24.81 |
+  | xauusd | h1 | 71 | +249.14 | -27.21 (-2.7%) | -48.74 (-4.9%) | 1.014 | +3.51 | +194.52 | -27.21 |
+  | xauusd | h2 | 58 | -95.00 | -34.06 (-3.4%) | -49.19 (-4.9%) | 1.018 | -1.64 | +163.12 | -20.93 |
+  | xauusd | h4 | 31 | +52.32 | -20.79 (-2.1%) | -20.79 (-2.1%) | 1.000 | +1.69 | +146.45 | -20.79 |
+  | us100 | m30 | 58 | +28.97 | -47.90 (-4.8%) | -60.89 (-6.1%) | 1.036 | +0.50 | +223.10 | -60.14 |
+  | us100 | m45 | 54 | +505.76 | -72.98 (-7.3%) | -74.27 (-7.4%) | 1.059 | +9.37 | +308.93 | -60.58 |
+  | us100 | m90 | 38 | +37.61 | -67.82 (-6.8%) | -88.50 (-8.8%) | 1.027 | +0.99 | +143.40 | -67.82 |
+  | us100 | h1 | 57 | +1218.99 | -141.16 (-14.1%) | -141.16 (-14.1%) | 1.018 | +21.39 | +601.92 | -103.00 |
+  | us100 | h2 | 30 | +1283.51 | -113.33 (-11.3%) | -113.33 (-11.3%) | 1.111 | +42.78 | +801.90 | -95.93 |
+  | us100 | h4 | 2 | -21.86 | -22.22 (-2.2%) | -22.22 (-2.2%) | 1.000 | -10.93 | +0.37 | -22.22 |
+  | btcusd | m30 | 70 | -324.83 | -36.23 (-3.6%) | -36.23 (-3.6%) | 1.045 | -4.64 | +31.80 | -18.56 |
+  | btcusd | m45 | 69 | +51.71 | -39.53 (-4.0%) | -39.53 (-4.0%) | 1.045 | +0.75 | +287.20 | -21.81 |
+  | btcusd | m90 | 54 | -11.62 | -19.50 (-1.9%) | -36.63 (-3.7%) | 1.019 | -0.22 | +110.63 | -19.50 |
+  | btcusd | h1 | 53 | +345.45 | -28.66 (-2.9%) | -44.03 (-4.4%) | 1.019 | +6.52 | +194.00 | -24.83 |
+  | btcusd | h2 | 35 | +184.04 | -22.69 (-2.3%) | -22.69 (-2.3%) | 1.000 | +5.26 | +146.12 | -22.69 |
+  | btcusd | h4 | 23 | +418.55 | -19.93 (-2.0%) | -30.50 (-3.1%) | 1.000 | +18.20 | +167.43 | -19.93 |
+
+- **Reading it honestly:** no consistent "best TF" — every symbol has at least one losing/thin cell
+  (gold h2, US100 m30/h4, BTC m30/m90). Best-looking cells (gold m45, US100 h1/h2, BTC h4) are each
+  a SINGLE full-window run, not split-tested — exactly the kind of number that died on a held-out
+  half in every prior gold thread (D-020, D-022). Do not treat any single cell here as validated.
+- **Next:** owner decides whether to split-test the promising cells, properly validate US100's SMC
+  config (currently a guess), or re-run the standing D-027/D-029 gold verdicts at the real spread.
+
+## 2026-07-05 — SMC re-backtest on 4.2yr M30 gold data: full+split PF positive, but exit granularity changed
+- Owner: re-backtest SMC on the M30 candle data just built.
+- Checked `scripts/sim_realistic.py`'s `--strategy smc` path first: unlike `svp` (which has an
+  explicit `--timeframe` re-aggregation flag), `smc` takes ZERO internal aggregation — `run_smc`
+  consumes whatever candles `load_csv` loads, straight into `SmcEngine`/`LadderExitManager`. Also
+  checked `orb/smc/mtf.py`'s `TimeframeAggregator`: it just buckets by `ts.hour*60+ts.minute`
+  windows, with no assumption the input step is 1 minute. Fed M30 rows into it: H4/D1 bias
+  aggregation is bucket-math-identical whether built from M1 or M30 (max-of-maxes/min-of-mins/
+  first-open/last-close over the same wall-clock window is the same number either way) so bias/veto
+  logic is unaffected; the M30-trigger aggregator degenerates to a near-identity pass since the
+  M30 timestamps already land on 30-min boundaries. **The one real behavior change:** the two-stage
+  SL's "M1 N+1 candle" confirmation (D-029) now evaluates on the M30 base rows themselves, since
+  that's the only "candle" stream the exit manager ever sees — so stop tightening/BE/profit-lock
+  fire at 30-min granularity, not 1-min. Documented this rather than silently treating the run as
+  like-for-like with the M1-designed live model.
+- Ran: `python scripts/sim_realistic.py data/xauusd_m30_20220410_20260703.csv --strategy smc
+  --spread 1.10 --start-balance 1000` (same flags as the standing post-refactor backtest, for
+  comparability). **Full window (2022-04→2026-07): n=83, PF 1.49, net +$597.10, win% 39.8, maxDD
+  19.0%.**
+- Split-sample check (own idea, mirroring the D-020 sign-stability test that killed the gold SVP
+  thread): wrote a quick python snippet to slice the CSV in half by row count (not by date-guessing)
+  into scratchpad temp files, reran both. **1st-half (2022-04→2024-05) n=58 PF 1.31 · 2nd-half
+  (2024-05→2026-07) n=25 PF 1.81.** Sign holds on both halves — unlike every prior gold SVP/sweep
+  variant, which flipped sign across windows (D-020, D-022).
+- **Honest tension flagged, not resolved:** this PF 1.49/1.31/1.81 directly contradicts the very
+  recent post-refactor 3mo M1 PF 0.09 (2026-07-05, earlier entry). Two candidate explanations
+  (regime-mix over 4yr vs. one recent quarter; and the M30 vs M1 exit-granularity difference above)
+  — did NOT isolate which one drives the gap, that's follow-up work if the owner wants it.
+- **Verdict: promising signal, not a live-readiness result.** Thin sample (25 trades in the more
+  recent half), single 50/50 split (not a full multi-split OOS gate like US100 got), and the
+  execution-model mismatch against the documented/live M1 exit design. SMC stays armed/not-live.
+- **Next:** owner call — deepen this thread (yearly splits, isolate the granularity variable by
+  re-testing the same window at M15 for comparison) or leave as a promising-but-unconfirmed lead.
+
+## 2026-07-05 — Pulled M15/M30/M45/M90 (~4.2yr) + M5 (~1.4yr) history; confirmed terminal-cap theory was wrong
+- Owner raised MT5 terminal Options > Charts > "Max bars in history" to unlimited (was 100000) and
+  asked to rerun the fetch + check it.
+- Reran `scripts/fetch_mt5_history.py` (unmodified at that point) → still exactly 100000 bars per
+  symbol, same ~3.5mo window as before the terminal change. **The earlier diagnosis was wrong (or
+  incomplete): the terminal setting is not the real limiter.**
+- Probed `copy_rates_from_pos` directly across timeframes (XAUUSD.ecn) to find the true wall:
+  M1 breaks at pos 100000 (2026-03-23) · M5 at pos ~100000 (2025-02-04, ~1.4yr) · M15 at pos
+  ~99000-100000 but that's **2022-04-10 (~4.2yr back)** — confirms the broker keeps ~100k most
+  recent bars PER TIMEFRAME, so coarser bars cover far more calendar time for the same count. This
+  is server-side (JustMarkets) retention, not client-configurable.
+- Owner then asked for M90/M45/M30/M15 @ 2yr and M5 @ 1yr (given M1 4yr is impossible from this
+  broker). Implemented:
+  - `scripts/fetch_mt5_history.py`: added `--timeframe {M1,M5,M15,M30,H1,H4,D1}` (was hardcoded
+    M1), default `--bars` 1600000 → 3000000 (just needs to not be the limiting factor — real stop
+    is the broker boundary found via the existing empty-return pagination break). Filename tag
+    generalized from hardcoded `_1m_` to `_{tf}_`.
+  - Fetched M15 and M5 base history for all 4 symbols (XAUUSD/US100/US500/XAGUSD.ecn): M15 →
+    2022-03/04-17 through 2026-07-03 (~100-101k bars, ~4.2yr, well past the 2yr ask); M5 →
+    2025-02-04 through 2026-07-03 (100k bars, ~1.4yr, past the 1yr ask).
+  - New `scripts/build_higher_tf.py`: MT5 has no native TIMEFRAME_M45/M90 constants (only exact
+    multiples of native TFs), so M30/M45/M90 are derived from the M15 base via
+    `scripts/sim_realistic.py`'s existing `aggregate_candles`/`load_csv`/`Candle` (imported as
+    `scripts.sim_realistic`, no `__init__.py` needed — Python 3 namespace package works since the
+    project root is already on `sys.path`) — reused rather than reimplemented. Ran across all 4
+    symbols' M15 CSVs → M30 (~50-51k bars), M45 (~50k bars), M90 (~25k bars) CSVs, same 2022→2026
+    span. Verified header/first-row/last-row on `xauusd_m90_20220410_20260703.csv`.
+- **What did NOT work:** raising the client terminal's history cache setting — it genuinely has no
+  effect on `copy_rates_from_pos` depth; don't waste time on that lever again for this broker.
+- **Result:** `data/` now carries, per symbol, M1 (3.5mo wall, unchanged/unfixable via MT5), M5
+  (1.4yr), M15/M30/M45/M90 (4.2yr). No engine/live-bot code touched.
+- **Next:** re-backtest SMC/ORB/SVP against the new longer windows; all standing PF verdicts (SMC
+  0.09, US100 2.23, etc.) are only ~3mo M1 samples and due for revalidation on real multi-year data.
+
+## 2026-07-05 — Diagnosed why candle CSVs cap at ~3mo; bumped fetch script for 4yr pulls
+- Owner asked for ≥4yr candle history for backtesting (existing `data/*.csv` all ~3mo windows).
+- Traced `orb/feeds/mt5feed.py` (live poll feed, `copy_rates_from_pos` count-based, not the bulk
+  puller) and `scripts/fetch_mt5_history.py` (the actual bulk history-to-CSV tool, paginates
+  `copy_rates_from_pos` in 50k chunks up to `--bars`, default was 200000).
+- Connected to the live MT5 terminal on this machine (`mt5.initialize()` succeeded) and probed
+  directly: `mt5.terminal_info().maxbars == 100000`; `copy_rates_from_pos('XAUUSD.ecn', M1, start,
+  5)` returns data at `start=0` but `(-1, 'Terminal: Call failed')` at every `start` ≥ 100000 up to
+  2,000,000 tried. Confirms the terminal's own "Max bars in history" (Options > Charts) setting —
+  not the broker, not the script — is what caps every existing CSV at ~100k M1 bars (~14.5 trading
+  weeks), matching the observed 20260303-20260612/20260619 filenames.
+- **Changed:** `scripts/fetch_mt5_history.py` default `--bars` 200000 → 1600000 (~4yr M1 for a
+  5-day trading week) + docstring note explaining the terminal cap and that it must be raised in
+  the MT5 UI first (not scriptable via the Python API).
+- **Did not** rerun the fetch — pointless until the owner raises the terminal setting. Also flagged
+  that broker-side M1 retention may still cap actual history below 4yr even after the terminal fix;
+  needs checking empirically once the cap is raised.
+- **Next:** owner raises MT5 Options > Charts > "Max bars in history" to ~2M, reruns
+  `python scripts/fetch_mt5_history.py`, checks resulting CSV date spans, then re-backtests
+  SMC/ORB/SVP on the longer window.
+
+## 2026-07-05 — BTCUSD.ecn SMC live-demo bot built (feed warmup + warmup gate + BTC flags)
+- Owner asked to "add BTCUSD.ecn and run it live" (demo MT5, 24/7, no backtest). Locked via Q&A:
+  Python bot (not the EA — source deleted, .ex5 stale), no daily loss cap, no auto-recovery when
+  MT5 closes. Logged as D-030.
+- `orb/feeds/mt5feed.py`: `stream_candles` gained `warmup_bars` (enlarged first fetch replays
+  recent M1 history once — SMC H4/D1 bias armed at launch; short-fetch tolerated; one catch-up
+  fetch if the replay itself takes ≥60s) and `max_reconnect_attempts` (N consecutive FAILED
+  reconnects → `Mt5FeedError` → process exit; success resets; default None = old infinite retry).
+  New `btcusd_live()` factory: BTCUSD.ecn, warmup 43200 (30 days), max_reconnect 3.
+- `orb/cli.py`: new `--warmup-gate` (default off) — during history replay, `on_signal` suppresses
+  ALL signal kinds (`# WARMUP_SIG` to stderr; stale EXIT would market-close real positions) and
+  `on_bar` returns before any broker call; `# WARMUP_DONE bars=N suppressed_signals=M` on the
+  first fresh candle. Signal grace = trigger_tf+2 min for smc (Signal.ts is the trigger-TF bar
+  OPEN — a naive short grace would kill the first legitimate M30 entry); bar grace 3 min.
+  `_utcnow()` module-level for tests. Also added the two missing SmcConfig flags
+  `--smc-stop-buffer` / `--smc-ticks-per-row`.
+- `scripts/symbol_specs.py`: BTCUSD.ecn added to the dump universe.
+- TDD throughout: 7 new feed tests (incl. count-3 regression pin for the ORB bots), 3 smc-flag
+  tests, 6 warmup-gate tests (incl. gate-off = entry still executes, and no forbidden broker
+  calls during warmup via the spy broker). **`python -m pytest -q` → 625 passed** (was 608).
+- What did NOT work / traps hit: none in code — but two design traps were caught in review before
+  coding: (a) an always-on staleness gate breaks the fixed-date CLI test harness → gate is opt-in;
+  (b) Signal.ts is the bar OPEN, so a "2 minutes stale" rule would suppress live M30 signals.
+- Deploy commands + calibration steps recorded in STATUS (symbol_specs / check_spread first;
+  initial values stop_max 1500 / poc_tol 60 / rows $30 / buffer 40 / comm 0).
+
+## 2026-07-05 — SMC two-stage SL refactor: trailing out, M15→M30, EA broadcast implemented
+- Executed the owner's locked two-stage exit refactor across `orb/smc/` + `mql5/SmcXau_EA.mq5`
+  (see D-029). Removed trailing entirely (Python `_trail()`/`observe()`, EA `TrailCandidate()` +
+  trail block + 4 trail inputs). Replaced with a discrete two-stage SL: stage1 (BE+costs) at 1R,
+  stage2 (final profit lock from candle N's low/high, floored) at 2R, then frozen — max 2
+  modifications ever, both tighten-only, both confirmed on the M1 N+1 rule (closed candles only).
+- `LadderExitManager.on_bar` signature changed `(positions, close)` → `(positions, candle)`; added
+  `SUPPORTS_CANDLE = True` marker so `scripts/sim_realistic.py`'s `Sim` and `orb/cli.py` route the
+  full candle to this manager while `Babysitter` still gets just `close` — no isinstance import
+  cycle, no change to the untouched `orb/babysitter.py`.
+- Repointed the SMC trigger timeframe M15 → M30 (owner decision): EA entry-recompute gate,
+  structure scan, ATR, volume SMA, CISD, and day-POC/equilibrium rows all moved to PERIOD_M30; M1
+  exit gate and H4/D1 bias untouched. Python only needed `SmcConfig.trigger_tf_min` default 15→30
+  (`TimeframeAggregator` already generic over any divisor of 1440).
+- Implemented the EA-side copy-trade broadcast that was previously spec-only
+  (`docs/copytrade_schema.md`): schema-v1 JSON, RFC-2104 HMAC-SHA256 built on
+  `CryptEncode(CRYPT_HASH_SHA256, ...)` (MQL5 has no native HMAC), in-memory queue + `OnTimer(1)`
+  flush (never blocks the trade path), `open`/`modify_sl`/`partial_close`/`close` events.
+- Recovered the original per-position risk distance `d` restart-safely from the *opening order's*
+  SL in MT5 history (`OriginalStopFromHistory`, mirrors the existing `OriginalVolumeFromHistory`
+  pattern) — the live position SL drifts once stage1/stage2 modify it, so it can no longer be used
+  to size R the way the pre-refactor EA did.
+- Rewrote `tests/test_smc_exits.py`, `tests/test_smc_config.py`, `tests/test_smc_cli.py` for the
+  new signature/fields; updated `scripts/sim_realistic.py` (`run_smc`, `Sim.smc_ladder` flag, CLI
+  flags) and `orb/cli.py` (smc-only branches: `build_smc_config`, sitter wiring, `on_bar` call site,
+  live spread/value-per-move sourced from `broker.symbol_specs()`/`current_spread()`).
+- **Verify:** `python -m pytest -q` → **608 passed** (up from 588; net +20 after removing all trail
+  tests and adding two-stage/N+1/gap-fires-stage2-directly tests). EA rewritten in full and
+  brace/paren-balance sanity-checked outside comments/strings (no MQL5 compiler available in this
+  session — owner must F7-compile in MetaEditor).
+- **Honest backtest, new numbers (old D-027 PF 0.15-0.46 verdict now void — different variant):**
+  `data/xauusd_1m_20260303_20260612.csv --strategy smc --spread 1.10` → n=52, PF=0.09,
+  net=-$519.63, win%=19.2, max_dd=52.1%. Worse than pre-refactor on this window; M30 fires far
+  less often and the 1R stage-2 floor cuts winners short. No profitability claim implied.
+- Logged D-029 (trail removal, two-stage SL, N+1 rule, M15→M30, EA broadcast). Not live — armed
+  build only, same as D-027.
+
+## 2026-07-04 — Part 2: execution layer + copy-trade broadcast, TDD build
 - Ran the approved plan (`~/.claude/plans/part-2-part-1-fizzy-thunder.md`) as a background workflow:
   8 parallel/chained build tasks (schema doc, tradeevents, broker event emission, retcodes+retry,
   execguard, symbols, broadcast, leader sidecar) then CLI wiring then adversarial review.
