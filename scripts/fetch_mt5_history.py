@@ -1,11 +1,20 @@
-"""Bulk M1 history pull from the local MT5 terminal -> UTC CSVs.
+"""Bulk history pull from the local MT5 terminal -> UTC CSVs.
 
 Read-only: copy_rates only, no orders. Broker bar times are server-local
 (JustMarkets = UTC+3 in DST / June); subtract the offset to emit true-UTC
 timestamps matching the existing data/*.csv (engine converts UTC -> NY).
 
 Usage:
-    python scripts/fetch_mt5_history.py --bars 200000 --tz-offset-hours 3
+    python scripts/fetch_mt5_history.py --timeframe M1 --bars 1600000 --tz-offset-hours 3
+    python scripts/fetch_mt5_history.py --timeframe M15 --bars 3000000
+
+Note: history depth is capped by the BROKER SERVER's per-timeframe bar
+retention (~100k most-recent bars per symbol/timeframe on JustMarkets),
+NOT by the client terminal's Options > Charts > "Max bars in history"
+setting (raising that did nothing - measured). Since the cap is bars, not
+calendar time, coarser timeframes reach further back: M1 ~100k bars (~3.5
+months), M15 ~4 years, H1/H4/D1 ~3-4 years. Set --bars high (default covers
+any TF) and let pagination stop naturally at the broker's true boundary.
 """
 
 from __future__ import annotations
@@ -17,13 +26,16 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 SYMBOLS = ["XAUUSD.ecn", "US100.ecn", "US500.ecn", "XAGUSD.ecn"]
-TIMEFRAME_M1 = 1  # mt5.TIMEFRAME_M1
+TIMEFRAMES = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbols", nargs="*", default=SYMBOLS)
-    ap.add_argument("--bars", type=int, default=200000)
+    ap.add_argument("--timeframe", choices=TIMEFRAMES, default="M1")
+    ap.add_argument("--bars", type=int, default=3000000,
+                    help="upper bound; pagination stops early at the "
+                         "broker's true history boundary regardless")
     ap.add_argument("--tz-offset-hours", type=float, default=3.0,
                     help="broker server TZ vs UTC (JustMarkets June = +3)")
     ap.add_argument("--outdir", default="data")
@@ -38,6 +50,8 @@ def main() -> int:
         print(f"mt5.initialize failed: {mt5.last_error()}", file=sys.stderr)
         return 3
 
+    tf_const = getattr(mt5, f"TIMEFRAME_{args.timeframe}")
+    tf_tag = args.timeframe.lower()
     offset = timedelta(hours=args.tz_offset_hours)
     outdir = Path(args.outdir)
     outdir.mkdir(exist_ok=True)
@@ -54,7 +68,7 @@ def main() -> int:
             by_time: dict[int, tuple] = {}
             start = 0
             while len(by_time) < args.bars:
-                r = mt5.copy_rates_from_pos(sym, TIMEFRAME_M1, start, chunk)
+                r = mt5.copy_rates_from_pos(sym, tf_const, start, chunk)
                 if r is None or len(r) == 0:
                     break
                 for row in r:
@@ -75,7 +89,7 @@ def main() -> int:
                              float(r["tick_volume"])))
             start = rows[0][0].strftime("%Y%m%d")
             end = rows[-1][0].strftime("%Y%m%d")
-            fname = outdir / f"{sym.split('.')[0].lower()}_1m_{start}_{end}.csv"
+            fname = outdir / f"{sym.split('.')[0].lower()}_{tf_tag}_{start}_{end}.csv"
             with open(fname, "w", newline="") as f:
                 w = csv.writer(f)
                 w.writerow(["ts", "open", "high", "low", "close", "volume"])

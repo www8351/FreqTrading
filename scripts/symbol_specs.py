@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import sys
 
-SYMBOLS = ["XAUUSD.ecn", "US100.ecn", "US500.ecn", "XAGUSD.ecn"]
+SYMBOLS = ["XAUUSD.ecn", "US100.ecn", "US500.ecn", "XAGUSD.ecn", "BTCUSD.ecn"]
 
 ATR_PERIOD = 14
 BARS = 300
