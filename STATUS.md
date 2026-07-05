@@ -1,6 +1,20 @@
 # STATUS
 
-## 2026-07-05 (latest) — SMC symbol x timeframe grid (XAUUSD/US100/BTCUSD, M30/M45/M90/H1/H2/H4): 3 bugs found+fixed, results below (D-031)
+## 2026-07-05 (latest) — bots.ps1 keeper now covers BTCUSD.ecn too (D-032, reverses D-030's no-auto-recovery)
+- Found an uncommitted `scripts/bots.ps1` edit (not made this session, unclear origin) adding
+  BTCUSD.ecn to `$ENABLED` — flagged to owner since it directly contradicts D-030's locked "no
+  automatic recovery when MT5 closes" for the BTC demo bot. **Owner confirmed: intentional reversal,
+  commit it.** Logged as **D-032**. Keeper now auto-restarts BOTH US100 (ORB) and BTCUSD.ecn (SMC,
+  `--warmup-gate --smc-stop-max-dist 1500 --smc-poc-tol 60 --smc-stop-buffer 40
+  --smc-ticks-per-row 3000 --smc-comm-per-lot 0`) on crash/MT5-restart. D-030's other terms (no
+  daily loss cap, no backtest gate, no profitability claim) still stand unchanged.
+- All other session work (SMC two-stage refactor, BTC demo bot, candle-data depth fixes, M30
+  re-test, symbol/TF grid) was already committed in 18 granular commits before this was found —
+  see PROGRESS for the full list. Also cleaned up 2 stray 0-byte untracked files
+  (`2026-07-05.md`, `mt5-history-depth.md`) left at repo root, unrelated origin, deleted.
+- **Not pushed yet** — owner to confirm push separately.
+
+## 2026-07-05 — SMC symbol x timeframe grid (XAUUSD/US100/BTCUSD, M30/M45/M90/H1/H2/H4): 3 bugs found+fixed, results below (D-031)
 - Owner asked to isolate the TF-granularity effect (rerun same window at H1/H2/H4/M90/M45) and
   extend to US100 + BTCUSD, with a fixed metrics set. Building this surfaced 3 real bugs — see
   **D-031** for full detail; **625/625 tests still green** throughout.

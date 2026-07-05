@@ -36,6 +36,25 @@
   whether to re-run the earlier gold-only verdicts (D-027/D-029/this session's M30 test) at the
   corrected real spread. Revisit only if the owner wants to invest further in this thread.
 
+## D-032 — Reverses D-030's "no auto-recovery": BTCUSD.ecn added to the bots.ps1 keeper
+- **Date:** 2026-07-05
+- **Context:** D-030 explicitly locked "no automatic recovery when MT5 closes" for the BTCUSD SMC
+  demo bot — closing the terminal was meant to stop it, and adding a `bots.ps1` `$ENABLED` entry was
+  explicitly REJECTED at the time ("the keeper's 60s respawn is exactly the auto-recovery the owner
+  declined"). Owner has now reversed that call.
+- **Decision:** `scripts/bots.ps1` `$ENABLED` gains a BTCUSD.ecn entry (`--source
+  orb.feeds.mt5feed:btcusd_live --broker mt5 --strategy smc --symbol BTCUSD.ecn --warmup-gate
+  --smc-stop-max-dist 1500 --smc-poc-tol 60 --smc-stop-buffer 40 --smc-ticks-per-row 3000
+  --smc-comm-per-lot 0`) alongside the existing US100 ORB entry. The keeper now auto-restarts BOTH
+  bots on crash/MT5-restart; the header comment updated from "US100 + BTCUSD.ecn (SMC)" only.
+- **Still true from D-030, unchanged:** no daily loss cap on the BTC bot, no backtest gate, no
+  profitability claim — this reversal is scoped ONLY to the auto-recovery mechanism, not the other
+  D-030 terms. `--warmup-gate` still suppresses signals during history replay after any
+  keeper-triggered restart, so a respawn won't fire stale signals.
+- **Status: final until revisited.** If the owner wants no-auto-recovery back, remove the
+  `$ENABLED` entry (`bots.ps1 restart` picks it up) — do not re-add the "no keeper" language to
+  D-030 without a corresponding decision entry here, to avoid the log contradicting the code again.
+
 ## D-030 — SMC goes live-on-demo on BTCUSD.ecn (Python bot, feed warmup + warmup gate; owner skipped the backtest gate)
 - **Date:** 2026-07-05
 - **Context:** Owner wants the SMC system trading Bitcoin ("the one to trade, 24/7") on the MT5
