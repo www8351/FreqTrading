@@ -139,6 +139,193 @@ def test_adaptive_sleep_times_to_bar_boundary(monkeypatch):
     assert sleeps[0] == 0.55
 
 
+class RecordingMt5(FakeMt5):
+    """FakeMt5 that records the ``count`` of every copy_rates_from_pos call."""
+
+    def __init__(self, batches):
+        super().__init__(batches)
+        self.counts: list[int] = []
+
+    def copy_rates_from_pos(self, symbol, tf, start, count):
+        self.counts.append(count)
+        return super().copy_rates_from_pos(symbol, tf, start, count)
+
+
+# --------------------------------------------------------------------------- #
+# History warmup (warmup_bars) — enlarged first fetch, then normal polling
+# --------------------------------------------------------------------------- #
+def test_warmup_first_fetch_enlarged_then_normal():
+    t0 = 1765360740
+    fake = RecordingMt5([
+        [bar(t0, 1, 2, 0.5, 1.5), bar(t0 + 60, 1.5, 3, 1, 2)],
+        [bar(t0, 1, 2, 0.5, 1.5), bar(t0 + 60, 1.5, 3, 1, 2.5),
+         bar(t0 + 120, 2.5, 4, 2, 3)],
+    ])
+    asyncio.run(take(stream_candles(mt5=fake, poll_sec=0, tz_offset_sec=0,
+                                    warmup_bars=5), 2))
+    assert fake.counts[:2] == [8, 3]  # warmup_bars+3 once, then normal 3
+
+
+def test_warmup_yields_history_then_dedupes_overlap():
+    t0 = 1765360740
+    hist = [bar(t0 + 60 * i, 1 + i, 2 + i, 0.5 + i, 1.5 + i) for i in range(8)]
+    fake = RecordingMt5([
+        hist,                                             # 7 closed + forming
+        [bar(t0 + 360, 7, 8, 6.5, 7.5), bar(t0 + 420, 8, 9, 7.5, 8.7),
+         bar(t0 + 480, 8.7, 10, 8, 9)],                   # overlap + 1 new closed
+    ])
+    candles = asyncio.run(take(stream_candles(mt5=fake, poll_sec=0,
+                                              tz_offset_sec=0,
+                                              warmup_bars=5), 8))
+    assert len(candles) == 8
+    ts = [int(c.ts.timestamp()) for c in candles]
+    assert ts == [t0 + 60 * i for i in range(8)]          # strictly once each
+    assert candles[-1].close == 8.7                       # closed value, not forming
+
+
+def test_warmup_retained_until_offset_lock():
+    # auto offset + stale (market-closed style) first batch: the warmup batch
+    # is discarded and the NEXT fetch is enlarged again, so history still
+    # arrives once a fresh forming bar allows the offset to lock.
+    NOW = 1765360800
+    stale_t = NOW - 147074
+    fake = RecordingMt5([
+        [bar(stale_t - 60, 1, 2, 0.5, 1.4), bar(stale_t, 1.4, 3, 1, 1.8)],
+        [bar(NOW - 185, 1, 2, 0.5, 1.2), bar(NOW - 125, 1.2, 2, 1, 1.6),
+         bar(NOW - 65, 1.6, 3, 1.5, 2.2), bar(NOW - 5, 2.2, 4, 2, 2.6)],
+    ])
+    out = asyncio.run(take(stream_candles(mt5=fake, poll_sec=0,
+                                          now_fn=lambda: NOW,
+                                          warmup_bars=5), 3))
+    assert fake.counts[:2] == [8, 8]           # warmup retained across defer
+    assert [c.close for c in out] == [1.2, 1.6, 2.2]
+    assert out[0].ts.timestamp() == NOW - 185  # offset locked to 0, true UTC
+
+
+def test_warmup_catchup_after_slow_replay():
+    # If replaying the warmup batch takes >= 60s, bars closed meanwhile would
+    # fall outside the normal 3-bar window: the next fetch is enlarged ONCE by
+    # elapsed//60 + 1, then polling returns to normal.
+    t0 = 1765360740
+    clock = {"t": 0.0}
+
+    def now():
+        clock["t"] += 70.0                      # every call advances 70s
+        return clock["t"]
+
+    fake = RecordingMt5([
+        [bar(t0, 1, 2, 0.5, 1.5), bar(t0 + 60, 1.5, 3, 1, 2)],
+        [bar(t0, 1, 2, 0.5, 1.5), bar(t0 + 60, 1.5, 3, 1, 2.5),
+         bar(t0 + 120, 2.5, 4, 2, 3)],
+        [bar(t0 + 120, 2.5, 4, 2, 3.2), bar(t0 + 180, 3.2, 5, 3, 4)],
+    ])
+    asyncio.run(take(stream_candles(mt5=fake, poll_sec=0, tz_offset_sec=0,
+                                    now_fn=now, warmup_bars=5), 3))
+    # elapsed 70s -> pending = 70//60 + 1 = 2 -> count 5 once, then 3
+    assert fake.counts[:3] == [8, 5, 3]
+
+
+def test_default_warmup_zero_always_count_3():
+    # Regression pin for the live ORB bots: default args never enlarge fetches.
+    t0 = 1765360740
+    fake = RecordingMt5([
+        [bar(t0, 1, 2, 0.5, 1.5), bar(t0 + 60, 1.5, 3, 1, 2)],
+        [bar(t0, 1, 2, 0.5, 1.5), bar(t0 + 60, 1.5, 3, 1, 2.5),
+         bar(t0 + 120, 2.5, 4, 2, 3)],
+    ])
+    asyncio.run(take(stream_candles(mt5=fake, poll_sec=0, tz_offset_sec=0), 2))
+    assert set(fake.counts) == {3}
+
+
+# --------------------------------------------------------------------------- #
+# Bounded reconnects (max_reconnect_attempts) — exit instead of retry forever
+# --------------------------------------------------------------------------- #
+class DeadTerminalMt5(FakeMt5):
+    """initialize() succeeds once (startup), then fails: terminal was closed."""
+
+    def __init__(self, batches, ok_inits=1):
+        super().__init__(batches)
+        self.init_calls = 0
+        self.ok_inits = ok_inits
+
+    def initialize(self):
+        self.init_calls += 1
+        return self.init_calls <= self.ok_inits
+
+
+def test_exit_after_max_reconnect_attempts():
+    fake = DeadTerminalMt5([None] * 12)
+
+    async def drain():
+        async for _ in stream_candles(mt5=fake, poll_sec=0, tz_offset_sec=0,
+                                      max_reconnect_attempts=2):
+            pass
+
+    with pytest.raises(Mt5FeedError, match="reconnect"):
+        asyncio.run(drain())
+    assert fake.init_calls == 3  # startup + exactly 2 failed reconnects
+
+
+def test_reconnect_success_resets_attempt_counter():
+    # first reconnect fails, second succeeds -> counter resets, feed resumes.
+    t0 = 1765360740
+
+    class FlakyMt5(DeadTerminalMt5):
+        def initialize(self):
+            self.init_calls += 1
+            return self.init_calls != 2   # startup ok, 1st reconnect fails, rest ok
+
+    fake = FlakyMt5([
+        None, None, None, None,
+        [bar(t0, 1, 2, 0.5, 1.5), bar(t0 + 60, 1.5, 3, 1, 2)],
+    ])
+    out = asyncio.run(take(stream_candles(mt5=fake, poll_sec=0,
+                                          tz_offset_sec=0,
+                                          max_reconnect_attempts=2), 1))
+    assert out[0].close == 1.5
+
+
+def test_default_reconnects_unbounded(monkeypatch):
+    # default max_reconnect_attempts=None keeps today's infinite-retry behavior.
+    import orb.feeds.mt5feed as feed
+
+    class _Stop(Exception):
+        pass
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(d):
+        sleeps.append(d)
+        if len(sleeps) >= 10:
+            raise _Stop
+
+    monkeypatch.setattr(feed.asyncio, "sleep", fake_sleep)
+    fake = DeadTerminalMt5([None] * 20)
+
+    async def drain():
+        async for _ in stream_candles(mt5=fake, poll_sec=2.0, tz_offset_sec=0):
+            pass
+
+    with pytest.raises(_Stop):        # ends via the sleep hook, NOT Mt5FeedError
+        asyncio.run(drain())
+    assert fake.init_calls > 4        # kept trying to reconnect throughout
+
+
+def test_btcusd_live_factory(monkeypatch):
+    import orb.feeds.mt5feed as feed
+
+    seen = {}
+
+    def spy(**kw):
+        seen.update(kw)
+        return "GEN"
+
+    monkeypatch.setattr(feed, "stream_candles", spy)
+    assert feed.btcusd_live() == "GEN"
+    assert seen == {"symbol": "BTCUSD.ecn", "warmup_bars": 43200,
+                    "max_reconnect_attempts": 3}
+
+
 def test_no_rates_backoff_grows(monkeypatch):
     # Consecutive empty polls back off exponentially (2x each), capped, so a
     # down terminal isn't hammered. Capture the first two backoff sleeps.
