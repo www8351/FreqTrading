@@ -1,5 +1,5 @@
 <#
-  bots.ps1 - ORB live-bot keeper + control. Enabled universe: US100 (ORB) + BTCUSD.ecn (SMC).
+  bots.ps1 - SMC live-bot keeper + control. Enabled universe: all 5 on SMC (M15; XAUUSD M30).
   Supersedes scripts/watchdog.ps1 (do not run both - two keepers would duplicate bots).
 
   ON/OFF = the "ORB-Bots-Keeper" Scheduled Task state (Enabled = ON, Disabled = OFF).
@@ -23,25 +23,35 @@ Set-Location $proj
 $TASK = 'ORB-Bots-Keeper'
 $STOP = Join-Path $proj 'STOP_TRADING'
 
-$common = "--broker mt5 --entry limit --roc-min 0.15 --spike-cancel 2.5 " +
-          "--tp-rrr 2 --session-len 1440 --rearm --rearm-range rebuild " +
-          "--trueopen-filter deadzone --log-level INFO"
-
-# ENABLED universe = US100 (ORB, Nasdaq) + BTCUSD.ecn (SMC, 24/7, D-030).
-# Launched with NO --macro-mode (macro off).
+# ENABLED universe = all 5 on SMC (D-033). Trigger TF M15, XAUUSD M30.
+# Launched with NO --macro-mode (macro off). $smc = shared SMC flags.
+# Scale params (poc-tol/stop-buffer/stop-max-dist/ticks-per-row):
+#   XAUUSD = gold defaults (2/0.5/15/100). BTCUSD = tuned. US100/US500/XAGUSD =
+#   auto-derived by price ratio vs gold 4115 (UNTESTED - no backtest; D-020 flagged
+#   XAUUSD/silver/index as no-edge). comm-per-lot 0 everywhere (demo). Feeds backfill
+#   30d M1 so the SMC H4/D1 bias is armed at launch (all use --warmup-gate).
+$smc = "--broker mt5 --strategy smc --warmup-gate --smc-comm-per-lot 0 --log-level INFO"
 $ENABLED = @(
-  @{ sym = 'US100.ecn'; out = 'live_us100_signals.log'; err = 'live_us100_engine.log';
+  @{ sym = 'XAUUSD.ecn'; out = 'live_xauusd_smc_signals.log'; err = 'live_xauusd_smc_engine.log';
+     args = "-m orb live --source orb.feeds.mt5feed:xauusd_live --symbol XAUUSD.ecn " +
+            "--smc-trigger-tf-min 30 $smc" },
+  @{ sym = 'US100.ecn'; out = 'live_us100_smc_signals.log'; err = 'live_us100_smc_engine.log';
      args = "-m orb live --source orb.feeds.mt5feed:us100_live --symbol US100.ecn " +
-            "--qty 0.60 --stop-min 15 --stop-max 30 --max-daily-loss 60 --quarter-filter q2q3 $common" },
+            "--smc-trigger-tf-min 15 --smc-poc-tol 14 --smc-stop-buffer 3.5 " +
+            "--smc-stop-max-dist 105 --smc-ticks-per-row 700 $smc" },
+  @{ sym = 'US500.ecn'; out = 'live_us500_smc_signals.log'; err = 'live_us500_smc_engine.log';
+     args = "-m orb live --source orb.feeds.mt5feed:us500_live --symbol US500.ecn " +
+            "--smc-trigger-tf-min 15 --smc-poc-tol 3.6 --smc-stop-buffer 0.9 " +
+            "--smc-stop-max-dist 27 --smc-ticks-per-row 180 $smc" },
+  @{ sym = 'XAGUSD.ecn'; out = 'live_xagusd_smc_signals.log'; err = 'live_xagusd_smc_engine.log';
+     args = "-m orb live --source orb.feeds.mt5feed:xagusd_live --symbol XAGUSD.ecn " +
+            "--smc-trigger-tf-min 15 --smc-poc-tol 0.03 --smc-stop-buffer 0.02 " +
+            "--smc-stop-max-dist 0.4 --smc-ticks-per-row 3 $smc" },
   @{ sym = 'BTCUSD.ecn'; out = 'live_btcusd_smc_signals.log'; err = 'live_btcusd_smc_engine.log';
-     args = "-m orb live --source orb.feeds.mt5feed:btcusd_live --broker mt5 --strategy smc " +
-            "--symbol BTCUSD.ecn --warmup-gate --smc-stop-max-dist 1500 --smc-poc-tol 60 " +
-            "--smc-stop-buffer 40 --smc-ticks-per-row 3000 --smc-comm-per-lot 0 --log-level INFO" }
+     args = "-m orb live --source orb.feeds.mt5feed:btcusd_live --symbol BTCUSD.ecn " +
+            "--smc-trigger-tf-min 15 --smc-poc-tol 60 --smc-stop-buffer 40 " +
+            "--smc-stop-max-dist 1500 --smc-ticks-per-row 3000 $smc" }
 )
-# DISABLED (kept for easy re-enable - do NOT launch unless you add them back to $ENABLED):
-#  XAUUSD.ecn: --source orb.feeds.mt5feed:xauusd_live --symbol XAUUSD.ecn --qty 0.04 --stop-min 2.6  --stop-max 5.2  --max-daily-loss 110 $common   (no-edge D-020; parked for US100-only 24h watch)
-#  US500.ecn : --source orb.feeds.mt5feed:us500_live  --symbol US500.ecn  --qty 1.5  --stop-min 4    --stop-max 8    --max-daily-loss 60 --quarter-filter q2q3 $common
-#  XAGUSD.ecn: --source orb.feeds.mt5feed:xagusd_live --symbol XAGUSD.ecn --qty 0.01 --stop-min 0.10 --stop-max 0.20 --max-daily-loss 60 --quarter-filter q2q3 $common
 
 function Get-OrbProcs {
   Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
@@ -88,7 +98,7 @@ switch ($Action) {
       -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
     try {
       Register-ScheduledTask -TaskName $TASK -Action $act -Trigger $trg -Principal $prin `
-        -Settings $set -Description 'ORB live-bot keeper (XAUUSD + US100)' -Force `
+        -Settings $set -Description 'SMC live-bot keeper (all 5 symbols)' -Force `
         -ErrorAction Stop | Out-Null
       Write-Host "installed Scheduled Task '$TASK' (runs at logon). Turn on with: bots.ps1 on"
     } catch {
@@ -125,7 +135,7 @@ switch ($Action) {
     Backup-Logs
     Remove-Item $STOP -ErrorAction SilentlyContinue
     foreach ($b in $ENABLED) { Start-Bot $b }
-    Write-Host "restart - killed $n stale/dup proc(s), relaunched $($ENABLED.Count) (XAUUSD + US100)"
+    Write-Host "restart - killed $n stale/dup proc(s), relaunched $($ENABLED.Count) SMC bots"
     Write-Host "verify in ~2 min: Get-Content live_engine.log -Tail 6   (want broker_tz_offset_sec=, no IPC send failed)"
   }
   'watch' {
