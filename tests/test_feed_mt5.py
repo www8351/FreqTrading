@@ -323,7 +323,23 @@ def test_btcusd_live_factory(monkeypatch):
     monkeypatch.setattr(feed, "stream_candles", spy)
     assert feed.btcusd_live() == "GEN"
     assert seen == {"symbol": "BTCUSD.ecn", "warmup_bars": 43200,
-                    "max_reconnect_attempts": 3}
+                    "max_reconnect_attempts": 3, "stale_reconnect_sec": 300.0}
+
+
+def test_cfd_factories_have_stale_watchdog(monkeypatch):
+    # The 24/5 CFD feeds arm the staleness watchdog at 3900s (> the ~1h daily
+    # rollover break, so normal breaks don't churn) plus warmup + reconnect.
+    import orb.feeds.mt5feed as feed
+
+    for factory, sym in [(feed.xauusd_live, "XAUUSD.ecn"),
+                         (feed.us100_live, "US100.ecn"),
+                         (feed.us500_live, "US500.ecn"),
+                         (feed.xagusd_live, "XAGUSD.ecn")]:
+        seen = {}
+        monkeypatch.setattr(feed, "stream_candles", lambda **kw: seen.update(kw))
+        factory()
+        assert seen == {"symbol": sym, "warmup_bars": 43200,
+                        "max_reconnect_attempts": 3, "stale_reconnect_sec": 3900.0}
 
 
 def test_no_rates_backoff_grows(monkeypatch):
@@ -357,3 +373,112 @@ def test_no_rates_backoff_grows(monkeypatch):
     assert len(sleeps) == 2
     assert sleeps[0] < sleeps[1]          # exponential growth
     assert sleeps == [4.0, 8.0]           # 2*2^1, 2*2^2
+
+
+# --------------------------------------------------------------------------- #
+# Staleness watchdog (stale_reconnect_sec) — silent stale feed (terminal
+# suspended: copy_rates returns old bars with NO error) never trips the
+# no-rates reconnect and the keeper can't see it (proc alive). Force a
+# reconnect to refresh the link when no NEW closed bar arrives for too long.
+# --------------------------------------------------------------------------- #
+class StaleMt5(FakeMt5):
+    """Returns a frozen batch (one closed bar + a stuck forming bar) — the
+    terminal is up (no error) but never advances (overnight-stall bug). ``clock``
+    advances one step per copy_rates call (once per loop cycle). Once a reconnect
+    has happened it returns ``fresh`` (a NEW closed bar) so the feed resumes."""
+
+    def __init__(self, stale, fresh, clock, step):
+        super().__init__([])
+        self._stale = stale
+        self._fresh = fresh
+        self._clock = clock
+        self._step = step
+
+    def copy_rates_from_pos(self, symbol, tf, start, count):
+        self._clock["t"] += self._step
+        b = self._fresh if self.reconnects >= 1 else self._stale
+        return [dict(x) for x in b]
+
+
+def test_stale_feed_forces_reconnect():
+    # No new closed bar for > stale_reconnect_sec while the market should be
+    # open (last bar not weekend-old) -> feed reconnects; the refreshed link
+    # then delivers a new closed bar (feed resumes).
+    t0 = 1765360740
+    stale = [bar(t0, 1, 2, 0.5, 1.5), bar(t0 + 60, 1.5, 3, 1, 2)]  # forming frozen
+    fresh = [bar(t0, 1, 2, 0.5, 1.5), bar(t0 + 60, 1.5, 3, 1, 2.0),
+             bar(t0 + 120, 2, 4, 1.5, 3)]                          # t0+60 now closed
+    clock = {"t": float(t0)}
+    fake = StaleMt5(stale, fresh, clock, step=200.0)
+    out = asyncio.run(take(stream_candles(
+        mt5=fake, poll_sec=0, tz_offset_sec=0, now_fn=lambda: clock["t"],
+        stale_reconnect_sec=300.0), 2))
+    assert [c.close for c in out] == [1.5, 2.0]  # resumed after the reconnect
+    assert fake.reconnects >= 1                  # stall detected -> reconnected
+
+
+def test_stale_feed_skips_reconnect_when_market_closed(monkeypatch):
+    # Last bar is weekend-old (> STALE_MARKET_CLOSED_SEC): silence is EXPECTED,
+    # so the watchdog must NOT churn reconnects. Loop ends via the sleep hook.
+    import orb.feeds.mt5feed as feed
+
+    class _Stop(Exception):
+        pass
+
+    n = {"s": 0}
+
+    async def fake_sleep(d):
+        n["s"] += 1
+        if n["s"] >= 5:
+            raise _Stop
+
+    monkeypatch.setattr(feed.asyncio, "sleep", fake_sleep)
+    t0 = 1765360740
+    stale = [bar(t0, 1, 2, 0.5, 1.5), bar(t0 + 60, 1.5, 3, 1, 2)]
+    clock = {"t": float(t0)}
+    fake = StaleMt5(stale, stale, clock, step=60000.0)  # each cycle ages >15h
+
+    async def drain():
+        try:
+            async for _ in stream_candles(mt5=fake, poll_sec=0, tz_offset_sec=0,
+                                          now_fn=lambda: clock["t"],
+                                          stale_reconnect_sec=300.0):
+                pass
+        except _Stop:
+            pass
+
+    asyncio.run(drain())
+    assert fake.reconnects == 0   # market closed -> no reconnect churn
+
+
+def test_no_stale_watchdog_by_default(monkeypatch):
+    # Regression pin: without stale_reconnect_sec the watchdog is OFF — a stale
+    # feed is never force-reconnected (default behavior byte-identical).
+    import orb.feeds.mt5feed as feed
+
+    class _Stop(Exception):
+        pass
+
+    n = {"s": 0}
+
+    async def fake_sleep(d):
+        n["s"] += 1
+        if n["s"] >= 6:
+            raise _Stop
+
+    monkeypatch.setattr(feed.asyncio, "sleep", fake_sleep)
+    t0 = 1765360740
+    stale = [bar(t0, 1, 2, 0.5, 1.5), bar(t0 + 60, 1.5, 3, 1, 2)]
+    clock = {"t": float(t0)}
+    fake = StaleMt5(stale, stale, clock, step=200.0)  # would trigger if armed
+
+    async def drain():
+        try:
+            async for _ in stream_candles(mt5=fake, poll_sec=0, tz_offset_sec=0,
+                                          now_fn=lambda: clock["t"]):
+                pass
+        except _Stop:
+            pass
+
+    asyncio.run(drain())
+    assert fake.reconnects == 0
