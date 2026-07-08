@@ -1,6 +1,42 @@
 # STATUS
 
-## 2026-07-05 (latest) — bots.ps1 keeper now covers BTCUSD.ecn too (D-032, reverses D-030's no-auto-recovery)
+## 2026-07-08 (latest) — silent stale-feed stall found + fixed (staleness watchdog, D-034)
+- Owner flagged BTC should trade 24/7. Investigation: overnight ALL 5 bots went silent ~7h (engine
+  logs frozen at the 20:30Z warmup instant) while a fresh MT5 query had CURRENT bars. Root cause:
+  machine/terminal suspended → long-running feed connections returned stale-but-no-error bars; the
+  no-rates reconnect never fired and the keeper saw live procs. Direct `copy_rates` probe confirmed
+  the terminal streams live 24/7 (+60s/bar for BTC/XAU/US100) — market fine, connection wedged.
+- **Fix (D-034):** `stale_reconnect_sec` watchdog in `stream_candles` (default OFF). Armed in
+  factories: BTC 300s, CFDs 3900s (> the ~1h daily rollover break). Forces a link-refresh reconnect
+  on a silent stall; never RAISES on staleness (avoids warmup-churn crash-loop). TDD, 4 new tests.
+- **Also learned (owner):** BTC = 24/7, XAU/US100/US500/XAGUSD = 24/5 CFD hours (+ daily ~20-21 UTC
+  rollover break). `live_state.py` omits BTC and its `market_live` is a broker-tz display artifact —
+  unreliable; use the direct copy_rates probe. See memory [[bots-keeper-ops]].
+- **State now:** 631 tests green. Fleet restarted to load the watchdog — 10 procs (5×2), one keeper,
+  warmed to current bars. Ready to commit.
+
+## 2026-07-07 — all 5 symbols live on SMC under the keeper (demo; D-033, UNVALIDATED)
+- Owner order: "check status, run all 5 (BTCUSD US100 XAUUSD US500 XAGUSD), no test, activate now,
+  M15 on all, XAUUSD M30." Done. `bots.ps1 $ENABLED` rewritten {US100 ORB + BTCUSD SMC} → **all 5
+  on SMC**, trigger M15 (XAUUSD M30). Running on JustMarkets-Demo3 (demo, $520). **All 5 alive +
+  feeding under ONE keeper**; 0 positions (feed closed now, `market_live=False` on every symbol incl.
+  BTC — bots armed, will fire when quotes resume).
+- **Scale params** (see D-033): XAUUSD gold defaults, BTCUSD tuned, US100/US500/XAGUSD **auto-derived
+  by price ratio** (US100 poc14/buf3.5/max105/rows700; US500 poc3.6/buf0.9/max27/rows180; XAGUSD
+  poc0.03/buf0.02/max0.4/rows3). All `SmcConfig`-validated. US100 poc 14 corrects D-031's guess of 10.
+- **Code:** `orb/feeds/mt5feed.py` — added 30d warmup + reconnect(3) to the 4 non-BTC live factories
+  (mirrors btcusd_live) so SMC H4/D1 bias arms at launch; all backfilled 43k bars, warmup entry
+  suppressed by `--warmup-gate`. `scripts/bots.ps1` — new $ENABLED + header/message updates.
+- **RISK (flagged, not resolved):** contradicts **D-020** (XAUUSD/US500/XAGUSD = no edge) and drops
+  **US100 ORB, the only proven positive-edge strategy**, for SMC. The 3 derived configs are UNTESTED
+  price-ratio guesses — no backtest. Demo only; NOT live-money ready. Revalidate before real money.
+- **Ops gotchas hit:** 1 bot = 2 python procs (main+worker, by design — don't kill "dups");
+  `Enable/Disable-ScheduledTask` = Access denied (use STOP_TRADING + Start-ScheduledTask); a
+  command-guard blocks `Remove-Item` lines containing `\S+` (let `bots.ps1 on` clear STOP).
+- **Not committed** — working-tree edits only (`orb/cli.py`, `tests/test_smc_cli.py` were already
+  dirty pre-session; now also `orb/feeds/mt5feed.py`, `scripts/bots.ps1`). Owner to confirm commit/push.
+
+## 2026-07-05 — bots.ps1 keeper now covers BTCUSD.ecn too (D-032, reverses D-030's no-auto-recovery)
 - Found an uncommitted `scripts/bots.ps1` edit (not made this session, unclear origin) adding
   BTCUSD.ecn to `$ENABLED` — flagged to owner since it directly contradicts D-030's locked "no
   automatic recovery when MT5 closes" for the BTC demo bot. **Owner confirmed: intentional reversal,

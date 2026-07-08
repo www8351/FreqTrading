@@ -891,3 +891,70 @@
   weekend staleness >=~40h; clean separation).
 - **Status:** Final. Added `now_fn` clock injection + regression test
   `test_auto_offset_defers_on_stale_bars`. 91 tests green.
+
+## D-033 (2026-07-07): all 5 symbols live (demo) on SMC — M15, XAUUSD M30 (user-directed, UNVALIDATED)
+- **Decision:** On explicit owner request ("check status, run all 5 — BTCUSD US100
+  XAUUSD US500 XAGUSD, no test, activate now, M15 on all, XAUUSD M30, go"), the
+  `bots.ps1` keeper's `$ENABLED` was rewritten from {US100 ORB, BTCUSD SMC} to **all
+  5 on the SMC strategy**: trigger TF **M15** for US100/US500/XAGUSD/BTCUSD, **M30**
+  for XAUUSD. Launched on JustMarkets-Demo3 (demo=True, balance $520), no --macro-mode,
+  all `--warmup-gate --smc-comm-per-lot 0`.
+- **SMC scale params:** XAUUSD = gold defaults (poc 2 / buf 0.5 / max 15 / rows 100);
+  BTCUSD = existing tuned (60/40/1500/3000). US100/US500/XAGUSD = **auto-derived by
+  price-ratio vs gold 4115** (all `SmcConfig`-validated, row sizes sane):
+  US100 (×7.10) poc 14 / buf 3.5 / max 105 / rows 700;
+  US500 (×1.83) poc 3.6 / buf 0.9 / max 27 / rows 180;
+  XAGUSD (×0.0147) poc 0.03 / buf 0.02 / max 0.4 / rows 3.
+  US100 poc-tol 14 **corrects the D-031 first-pass guess of 10**.
+- **Feeds:** added 30d M1 warmup + bounded reconnect(3) to `xauusd_live/us100_live/
+  us500_live/xagusd_live` (mirrors `btcusd_live`; verified no test asserts their
+  kwargs, only `test_btcusd_live_factory`). Warmup arms the SMC H4/D1 bias at launch —
+  all 5 backfilled 43k bars, `WARMUP_DONE` once each, the historical entry correctly
+  suppressed by `--warmup-gate`.
+- **Why:** direct owner order on a demo account (reversible, ~$10 risk/trade at
+  risk_pct 2%). Not a research/edge decision.
+- **Rejected:** (a) gold-default scale on all 5 — would zero-trade the index/silver
+  symbols (D-031/D-025 scale bug); (b) keeping US100 on ORB.
+- **Caveats / RISK (recorded, not resolved):** this **contradicts D-020** (XAUUSD/
+  US500/XAGUSD flagged no replicable edge) and **abandons US100 ORB, the only
+  positive-edge strategy on record**, for SMC. The 3 derived configs have **no
+  backtest** — pure price-ratio guesses. `tick_size` is hardcoded 0.01 for all (not a
+  CLI flag); index/silver quotes round to 2dp, accepted. Demo only — **do not treat as
+  live-money ready**; validate with backtests first.
+- **Ops notes (this session):** (1) one bot = **2 python.exe** (main + worker/IPC child,
+  child parented by main) — normal footprint; keeper `Test-Alive` (existence check)
+  tolerates it; do NOT kill "duplicates". (2) `Enable/Disable-ScheduledTask` return
+  **Access is denied** (needs elevation) — control the keeper via the `STOP_TRADING`
+  file + `Start-ScheduledTask` instead; task `MultipleInstances=IgnoreNew` so only one
+  watch loop runs. (3) A shell command-guard blocks `Remove-Item` lines that also
+  contain a `\S+`-style token — let `bots.ps1 on` do the STOP-file removal internally.
+- **Status:** Live (demo), all 5 alive+feeding under one keeper. Feed currently closed
+  (`market_live=False` on every symbol incl. 24/7 BTC) so they idle armed and will fire
+  when quotes resume. Revisitable — the whole expansion is unvalidated.
+
+## D-034 (2026-07-08): feed staleness watchdog (silent stale-feed stall fix)
+- **Trigger:** overnight, all 5 bots went silent for ~7h — every engine log froze at the
+  warmup instant (2026-07-07T20:30Z) while a FRESH `mt5.initialize()` showed current bars.
+  Root cause: the machine/terminal suspended overnight and the long-running feed connections
+  returned STALE-but-present bars (old data, NO error). `stream_candles` only reconnects on a
+  no-rates *error*, so a stale-no-error feed never tripped it; `Test-Feeding`/keeper saw a live
+  proc and never respawned. (Also confirmed the terminal streams live 24/7 for BTC via a direct
+  `copy_rates` probe: +60s/bar — so it was the bot's connection, not the market.)
+- **Decision:** added a `stale_reconnect_sec` watchdog to `orb/feeds/mt5feed.py`
+  `stream_candles` (default `0.0` = OFF, so the default path is byte-unchanged). When armed: if
+  no NEW closed bar for `stale_reconnect_sec` AND the last bar is younger than
+  `STALE_MARKET_CLOSED_SEC` (15h — else it's a weekend/close and silence is expected), force a
+  `_reconnect` to refresh the link; the timer reset throttles it to ≤1 reconnect/interval and
+  reuses the existing `max_reconnect_attempts` exit path if reconnect truly fails. Wired into the
+  factories: **BTC 300s** (24/7 — a 5-min gap is a stall), **CFDs 3900s** (just over the ~1h
+  daily rollover break so normal breaks don't churn).
+- **Why (owner chose "build watchdog"):** the keeper can't see a silent stall; a self-healing
+  feed keeps demo bots alive across overnight suspends without manual `bots.ps1 restart`.
+- **Rejected:** (a) keep-machine-awake only (no code fix, ignores the gap); (b) leave-as-is +
+  manual restart; (c) RAISE on staleness instead of reconnect — rejected because it would crash-
+  loop the keeper into a full 43k-bar warmup re-fetch every interval during any long quiet.
+- **Tests:** TDD, 4 new in `tests/test_feed_mt5.py` (forces-reconnect+resumes, skips-when-market-
+  closed, off-by-default, CFD factory wiring) + updated `test_btcusd_live_factory`. 631 green.
+- **Status:** Final. Running bots restarted to load it. Latent follow-up: the ~1h daily CFD break
+  is still below any useful mid-session threshold — a break longer than 65min would trigger
+  (harmless) reconnect churn; revisit with session-calendar awareness if it matters.

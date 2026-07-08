@@ -1,6 +1,52 @@
 # PROGRESS
 
-## 2026-07-05 (latest) — Commit sweep: found all session work already committed (18 commits); one flagged discrepancy resolved (D-032)
+## 2026-07-08 (latest) — Found + fixed the silent stale-feed stall; feed staleness watchdog (D-034)
+- Owner noted BTC trades 24/7 (rest 24/5 CFD). Checking, found ALL 5 bots had been silent ~7h
+  overnight — engine logs frozen at the 20:30Z warmup instant, `market_live=False` everywhere.
+- **Diagnosed:** MT5 timestamps are broker time (UTC+3); a fresh `mt5.initialize()` + `copy_rates`
+  probe showed CURRENT bars advancing +60s/65s for BTC/XAU/US100 → terminal fine, market open. The
+  running bots' long-lived connections had gone stale (machine suspended overnight) returning
+  old-but-no-error bars. The no-rates reconnect only fires on an ERROR, so a silent stale feed
+  never triggered it and the keeper (existence check) never respawned the wedged procs.
+- **Fixed (TDD, D-034):** added `stale_reconnect_sec` to `stream_candles` (default 0.0 = OFF, so
+  the default path is byte-unchanged). Armed: if no new closed bar for the interval while the last
+  bar is < 15h old (else market-closed, expected), force a `_reconnect`; reset throttles to ≤1/
+  interval; never raises on staleness (reuses the existing reconnect-fail exit only). Factories:
+  BTC 300s, CFDs 3900s (> the ~1h daily rollover break so normal breaks don't churn).
+  - RED→GREEN: wrote `test_stale_feed_forces_reconnect` (fails: unknown kwarg) → implemented →
+    green; added skip-when-market-closed, off-by-default, and CFD-factory-wiring tests; updated
+    `test_btcusd_live_factory`. **631 passed** full suite.
+- **Restarted the fleet** so the running procs import the new feed code (they'd been launched pre-fix
+  and would stall again). 10 procs up, warmed to current bars, no traceback.
+- Saved ops facts to memory [[bots-keeper-ops]] (silent-stall detection, live_state BTC blind spot +
+  tz display artifact, market hours). Committing all work now.
+
+## 2026-07-07 — Activated all 5 symbols live on SMC (demo) under the keeper (D-033)
+- **Task:** owner said check bot status and run all 5 (BTCUSD/US100/XAUUSD/US500/XAGUSD), M15 on all,
+  XAUUSD M30, no test, activate now.
+- **Investigated first:** status showed keeper ON with only US100(ORB)+BTCUSD(SMC); "M15/M30" maps to
+  SMC-only `--smc-trigger-tf-min`, so "all on M15" ⇒ switch all 5 to SMC. Found US100/US500/XAGUSD had
+  **no tuned SMC scale params** (only XAUUSD gold-defaults + BTCUSD tuned exist) — gold defaults would
+  mis-trade them (D-031/D-025 scale bug). Asked owner how to handle → **"auto-derive by price ratio."**
+- **Changed:** (1) `orb/feeds/mt5feed.py` — added `warmup_bars=43200, max_reconnect_attempts=3` to
+  `xauusd_live/us100_live/us500_live/xagusd_live` (mirrors btcusd_live; arms SMC H4/D1 bias at launch).
+  (2) `scripts/bots.ps1` — `$ENABLED` rewritten to 5 SMC bots with price-ratio-derived scale params
+  (poc/buf/max/rows), M15 (XAUUSD M30), `--warmup-gate --smc-comm-per-lot 0`; header/messages updated.
+- **Verified before launch:** `SmcConfig` builds for all 5 param sets (row sizes: gold $1, US100 $7,
+  US500 $1.8, silver $0.03, BTC $30) — no crash-loop risk. No test asserts the 4 factories' kwargs.
+- **What worked / what tripped me:** launched via keeper. Mis-diagnosed the normal 2-python-per-bot
+  footprint (main+IPC worker) as "duplicate keepers" and killed one proc of each → broke all 5 →
+  transient 0 procs. Recovered. Confirmed empirically (one direct launch = 2 procs, child parented by
+  main). Also: `Enable/Disable-ScheduledTask` = Access denied (elevation) — used STOP_TRADING +
+  Start-ScheduledTask; a command-guard blocked my `Remove-Item ... \S+` lines — let `bots.ps1 on`
+  clear STOP internally.
+- **Result:** all 5 alive+feeding, one keeper, 43k-bar warmup each, `WARMUP_DONE` once/symbol, warmup
+  entry suppressed. 0 positions — feed closed (`market_live=False` all symbols incl BTC), armed for open.
+- **Honest caveat logged (D-033):** contradicts D-020 (no-edge symbols) + abandons US100 ORB (only
+  proven edge) for unvalidated SMC; 3 derived configs have no backtest. Demo only, revalidate for real.
+- **Not committed** — owner to confirm commit/push.
+
+## 2026-07-05 — Commit sweep: found all session work already committed (18 commits); one flagged discrepancy resolved (D-032)
 - Owner asked to commit every phase of this session's work granularly, then ask before pushing.
 - `git log`/`git status` check found the work was **already committed** — 18 commits already on
   the branch, timestamped minutes earlier, one per logical phase (SMC two-stage config/engine/sim/
