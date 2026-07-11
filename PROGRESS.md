@@ -1,6 +1,26 @@
 # PROGRESS
 
-## 2026-07-08 (latest) — Found + fixed the silent stale-feed stall; feed staleness watchdog (D-034)
+## 2026-07-12 (latest) — Rebuilt the MQL5 EA to v2 (two-stage) matching current Python (D-035)
+- Owner started MT5 and wanted to run the SMC EA. Found: tracked `mql5/SmcXau_EA.ex5` is a STALE
+  binary (pre-two-stage) and the `.mq5` source was removed (9dcde1f, "parked per D-030"). Flagged the
+  magic-20260621 collision with the live Python XAUUSD bot. Owner chose "rebuild EA from Python first."
+- **Recovered** the old source via `git show 9dcde1f~1:mql5/SmcXau_EA.mq5` — confirmed it was the
+  ORIGINAL (only one commit ever touched it; the D-029 two-stage rewrite was never committed), so its
+  exits were the old BE+swing/ATR trail, not the current two-stage.
+- **Ported to v2.00** (kept the unchanged skeleton: HTF bias / OB / POC / confluence / M15 trigger /
+  sizing): replaced `ManageOpenPositions` exit logic with the two-stage discrete SL (stage1 BE+costs
+  @1R, stage2 lock candle-N extreme floored to +1R @2R, frozen; M1 N+1, candidate N = prior closed M1
+  bar) porting `orb/smc/exits.py`; added `InpTriggerTf` input (default M30, was hardcoded M15) and
+  repointed all trigger-TF refs; added `OriginalStopFromHistory` (d from opening-order SL, D-029 fix);
+  inferred stage state statelessly from the live SL; removed the now-dead `TrailCandidate`/`Tighter`.
+- Confirmed exit cadence via `cli.py:833` (`on_bar(c)` fed every M1 candle) → N+1 is consecutive M1
+  bars, matching the EA's M1 `ManageOpenPositions` gate.
+- **Could not compile MQL5 here** (no MetaEditor) — sanity-checked braces/parens (96/96, 478/478),
+  all functions defined, no dangling refs to removed inputs. Handed off; **owner F7-compiled CLEAN**.
+- Removed the stale `.ex5` (mismatched, un-regenerable here; source canonical). Committed on a branch,
+  PR opened. EA behavior still needs demo-testing; magic collision to resolve before it trades XAUUSD.
+
+## 2026-07-08 — Found + fixed the silent stale-feed stall; feed staleness watchdog (D-034)
 - Owner noted BTC trades 24/7 (rest 24/5 CFD). Checking, found ALL 5 bots had been silent ~7h
   overnight — engine logs frozen at the 20:30Z warmup instant, `market_live=False` everywhere.
 - **Diagnosed:** MT5 timestamps are broker time (UTC+3); a fresh `mt5.initialize()` + `copy_rates`

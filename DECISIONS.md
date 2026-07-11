@@ -958,3 +958,28 @@
 - **Status:** Final. Running bots restarted to load it. Latent follow-up: the ~1h daily CFD break
   is still below any useful mid-session threshold — a break longer than 65min would trigger
   (harmless) reconnect churn; revisit with session-calendar awareness if it matters.
+
+## D-035 (2026-07-12): un-park the MQL5 EA + rebuild to v2 (two-stage), reverses D-030's source removal
+- **Trigger:** owner wanted to run the EA inside MT5. Found the tracked `mql5/SmcXau_EA.ex5` was a
+  STALE binary (pre-two-stage) and its `.mq5` source had been removed (9dcde1f, "parked per D-030").
+- **Decision (owner chose "rebuild from Python first"):** restored `mql5/SmcXau_EA.mq5` from git and
+  ported it to match the CURRENT two-stage Python SMC — reverses the D-030 source-removal:
+  - Replaced the old exit block (breakeven + swing/ATR trailing, armed at +2R) with the **two-stage
+    discrete SL** (stage1 = BE+costs @1R, stage2 = lock candle-N low/high floored to +1R @2R, then
+    FROZEN; M1 N+1 confirmation, candidate N = prior closed M1 bar) — ports `orb/smc/exits.py`.
+  - Added `InpTriggerTf` input (default **PERIOD_M30** to match the live XAUUSD keeper; old EA was
+    hardcoded M15). HTF stays H4/D1.
+  - Added `OriginalStopFromHistory`: `d` now comes from the OPENING order's SL, not the drifting
+    live position SL (the D-029 fix the EA never received).
+  - Stage state inferred STATELESSLY from where the live SL sits vs entry (survives restart, like
+    the partial state already did). Version bumped 1.00 -> 2.00.
+  - **Removed the stale `mql5/SmcXau_EA.ex5`** from the repo: it no longer matches the source and I
+    cannot recompile MQL5 here. Source is canonical; compile locally (F7). Binaries out of git.
+- **Verified:** owner **F7-compiled clean, no errors** (I cannot compile MQL5 in this environment).
+  Trade behavior NOT demo-tested yet. Braces/parens balanced (96/96, 478/478).
+- **MAGIC COLLISION (unresolved until attach):** EA magic `20260621` == the live Python XAUUSD SMC
+  bot. Running both on XAUUSD makes them cross-manage each other's trades. Before the EA trades
+  XAUUSD, the Python XAUUSD bot must be stopped + dropped from the keeper `$ENABLED` (one system per
+  symbol). Not done yet — Python XAUUSD bot still live; EA not yet attached.
+- **Status:** Source committed, compiles clean. Behavior unvalidated; EA not live. Open choice
+  (per owner) of EA-vs-Python per symbol once demo-tested.
