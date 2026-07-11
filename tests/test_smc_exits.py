@@ -16,10 +16,10 @@ def pos(ticket=1, type=LONG, volume=1.0, price_open=100.0, sl=98.0):
                            price_open=price_open, sl=sl)
 
 
-def candle(i, lo, hi):
-    mid = (lo + hi) / 2.0
+def candle(i, lo, hi, close=None):
+    mid = (lo + hi) / 2.0 if close is None else close
     return Candle(ts=T0 + timedelta(minutes=i), open=mid, high=hi,
-                  low=lo, close=mid)
+                  low=lo, close=mid if close is None else close)
 
 
 def apply(p, actions):
@@ -39,18 +39,25 @@ def sls(actions):
     return [a for a in actions if a.kind == "update_sl"]
 
 
+def bar(close, i=0, lo=None, hi=None):
+    """A flat candle at ``close`` (partials/final are close-only checks)."""
+    lo = close - 0.5 if lo is None else lo
+    hi = close + 0.5 if hi is None else hi
+    return candle(i, lo, hi, close=close)
+
+
 # --------------------------------------------------------------------- #
 # 1. first partial fires once
 # --------------------------------------------------------------------- #
 def test_first_partial_fires_once_at_5r():
     m = LadderExitManager()
     p = pos()                                    # long @100, sl 98 -> d=2
-    a = m.on_bar([p], close=110.0)               # r=5
+    a = m.on_bar([p], bar(110.0, 0))             # r=5
     pc = partials(a)
     assert len(pc) == 1
     assert abs(pc[0].volume - 0.40) < 1e-9
     apply(p, a)
-    a2 = m.on_bar([p], close=110.0)              # same level: no repeat
+    a2 = m.on_bar([p], bar(110.0, 1))            # same level: no repeat
     assert partials(a2) == []
 
 
@@ -60,12 +67,12 @@ def test_first_partial_fires_once_at_5r():
 def test_ladder_then_final_close():
     m = LadderExitManager()
     p = pos()
-    apply(p, m.on_bar([p], close=110.0))         # r=5: 0.40 off
-    a = m.on_bar([p], close=114.0)               # r=7
+    apply(p, m.on_bar([p], bar(110.0, 0)))       # r=5: 0.40 off
+    a = m.on_bar([p], bar(114.0, 1))             # r=7
     pc = partials(a)
     assert len(pc) == 1 and abs(pc[0].volume - 0.30) < 1e-9
     apply(p, a)
-    a = m.on_bar([p], close=120.0)               # r=10: final
+    a = m.on_bar([p], bar(120.0, 2))             # r=10: final
     pc = partials(a)
     assert len(pc) == 1 and abs(pc[0].volume - 0.30) < 1e-9
     assert p.ticket not in m._trades             # state forgotten
@@ -78,7 +85,7 @@ def test_ladder_then_final_close():
 def test_gap_to_final_closes_everything_cumulatively():
     m = LadderExitManager()
     p = pos()                                    # vol 1.00
-    a = m.on_bar([p], close=120.0)               # r=10 first sight
+    a = m.on_bar([p], bar(120.0, 0))             # r=10 first sight
     pc = partials(a)
     assert len(pc) == 3
     vols = [x.volume for x in pc]
@@ -91,147 +98,188 @@ def test_gap_to_final_closes_everything_cumulatively():
 
 
 # --------------------------------------------------------------------- #
-# 4. breakeven lock persists, never widens
+# 4. stage1 (BE + costs) fires once candle N confirms >= stage1_at_r,
+#    persists, never widens
 # --------------------------------------------------------------------- #
-def test_breakeven_locks_and_persists_long():
-    m = LadderExitManager()
-    p = pos()                                    # long @100 sl 98
-    a = m.on_bar([p], close=104.0)               # r=2: BE
+def test_stage1_locks_and_persists_long():
+    m = LadderExitManager(spread=0.10, comm_per_lot=7.0, value_per_move=100.0)
+    p = pos()                                    # long @100 sl 98 -> d=2
+    # candle 0 (N) closes at r=1 (entry+2); no candidate yet -> no SL action
+    a = m.on_bar([p], bar(102.0, 0))
+    assert sls(a) == []
+    # candle 1 (X): candidate N=candle0 confirms r_n=1 >= stage1_at_r(1.0)
+    a = m.on_bar([p], bar(103.0, 1))
     s = sls(a)
-    assert len(s) == 1 and abs(s[0].sl - 100.0) < 1e-9
+    assert len(s) == 1
+    expected = 100.0 + 0.10 + 7.0 / 100.0        # entry + spread + comm/value
+    assert abs(s[0].sl - expected) < 1e-9
     apply(p, a)
-    a = m.on_bar([p], close=103.0)               # r back to 1.5
-    assert sls(a) == []                          # floor persists, no widen
+    # a later bar drifting back down must not widen the stage1 floor
+    a = m.on_bar([p], bar(101.0, 2))
+    assert sls(a) == []
 
 
-# --------------------------------------------------------------------- #
-# 5. below trail_start_r (and be_at_r): nothing
-# --------------------------------------------------------------------- #
-def test_no_trail_below_trail_start_r():
-    m = LadderExitManager(trail_tf_min=1)
-    for i, lo in enumerate([96.0, 95.0, 94.0, 95.0, 96.0, 97.0]):
-        m.observe(candle(i, lo, lo + 1.0))       # swing low 94 confirmed
+def test_stage1_skipped_silently_when_invalid_vs_price():
+    """Price collapses back below the computed stage1 level: skip, no mark."""
+    m = LadderExitManager(spread=0.10, comm_per_lot=7.0, value_per_move=100.0)
     p = pos()
-    a = m.on_bar([p], close=103.8)               # r=1.9 < 2
+    m.on_bar([p], bar(102.0, 0))                  # seed candidate N (r=1)
+    # X's close collapses to just above entry, below the stage1 level
+    a = m.on_bar([p], bar(100.05, 1))
+    assert sls(a) == []
+    st = m._trades[p.ticket]
+    assert st.stage1_done is False                 # not marked: retry later
+    # the collapse bar is now the candidate (r too low): still nothing
+    a = m.on_bar([p], bar(103.0, 2))
+    assert sls(a) == []
+    # next candidate (r=1.5, close=103.0) confirms on the following bar
+    a = m.on_bar([p], bar(103.5, 3))
+    assert len(sls(a)) == 1
+
+
+# --------------------------------------------------------------------- #
+# 5. below stage1_at_r: nothing
+# --------------------------------------------------------------------- #
+def test_no_stage_action_below_stage1_at_r():
+    m = LadderExitManager()
+    p = pos()                                    # d=2
+    a = m.on_bar([p], bar(101.5, 0))             # r=0.75 < 1.0
+    a = m.on_bar([p], bar(101.5, 1))
     assert a == []
 
 
 # --------------------------------------------------------------------- #
-# 6. swing trail tightens, never loosens on a later lower swing
+# 6. stage2 (final profit lock) computed from candle N's low, floored,
+#    freezes the SL forever after
 # --------------------------------------------------------------------- #
-def test_swing_trail_tightens_never_loosens():
-    m = LadderExitManager(partial_levels=(), final_tp_r=0.0, be_at_r=0.0,
-                          trail_mode="swing", trail_buffer=0.5,
-                          swing_lookback=2, trail_tf_min=1)
-    lows = [104.0, 103.5, 103.0, 103.5, 104.0, 105.0]
-    for i, lo in enumerate(lows):
-        m.observe(candle(i, lo, lo + 1.0))       # swing low 103 confirmed
-    p = pos()                                    # long @100 sl 98
-    a = m.on_bar([p], close=110.0)
+def test_stage2_locks_from_candle_n_low_and_freezes():
+    m = LadderExitManager(stage2_buffer=0.5, stage2_min_lock_r=1.0)
+    p = pos()                                    # long @100 sl 98 -> d=2
+    # candle 0 (N): low=103.0, closes at r=2 (entry+4=104)
+    m.on_bar([p], bar(104.0, 0, lo=103.0, hi=104.5))
+    # candle 1 (X): confirms N -> stage2 SL = 103.0 - 0.5 = 102.5
+    a = m.on_bar([p], bar(104.2, 1))
     s = sls(a)
-    assert len(s) == 1 and abs(s[0].sl - 102.5) < 1e-9   # 103 - 0.5
+    assert len(s) == 1 and abs(s[0].sl - 102.5) < 1e-9
     apply(p, a)
-    lows2 = [102.0, 101.0, 100.5, 101.0, 102.0, 103.0]
-    for j, lo in enumerate(lows2):
-        m.observe(candle(len(lows) + j, lo, lo + 1.0))   # lower swing 100.5
-    a = m.on_bar([p], close=110.0)
-    assert sls(a) == []                          # 100.0 would loosen 102.5
+    st = m._trades[p.ticket]
+    assert st.stage1_done is True and st.stage2_done is True
+    # frozen: even a strongly favorable later candle must not move it again
+    m.on_bar([p], bar(110.0, 2, lo=108.0, hi=110.5))
+    a = m.on_bar([p], bar(112.0, 3))
+    assert sls(a) == []
 
 
-# --------------------------------------------------------------------- #
-# 7. atr trail when ready; silent when not
-# --------------------------------------------------------------------- #
-def test_atr_trail_when_ready():
-    m = LadderExitManager(partial_levels=(), final_tp_r=0.0, be_at_r=0.0,
-                          trail_mode="atr", trail_atr_mult=2.5,
-                          atr_period=2, trail_tf_min=1)
-    for i in range(3):                           # 2 completed TF bars, TR=2
-        m.observe(candle(i, 99.0, 101.0))        # ATR = 2.0, ready
-    p = pos()
-    a = m.on_bar([p], close=110.0)               # r=5 >= trail_start
+def test_stage2_floored_to_min_lock_r():
+    """Candle N's low sits BELOW entry+min_lock*d: SL floors there instead."""
+    m = LadderExitManager(stage2_buffer=0.5, stage2_min_lock_r=1.0)
+    p = pos()                                    # entry 100, d=2 -> floor=102.0
+    # candle 0 (N): low=100.2 (low-buffer=99.7 < floor 102.0), close r=2
+    m.on_bar([p], bar(104.0, 0, lo=100.2, hi=104.5))
+    a = m.on_bar([p], bar(104.2, 1))
     s = sls(a)
-    assert len(s) == 1 and abs(s[0].sl - 105.0) < 1e-9   # 110 - 2.5*2
+    assert len(s) == 1 and abs(s[0].sl - 102.0) < 1e-9   # floored, not 99.7
 
 
-def test_atr_not_ready_no_trail():
-    m = LadderExitManager(partial_levels=(), final_tp_r=0.0, be_at_r=0.0,
-                          trail_mode="atr", atr_period=2, trail_tf_min=1)
-    m.observe(candle(0, 99.0, 101.0))            # 0 completed -> not ready
-    p = pos()
-    assert m.on_bar([p], close=110.0) == []
+def test_stage2_can_fire_directly_on_a_gap_without_stage1_modify():
+    """A gap straight past both thresholds on candle N: one SL update only,
+    both flags marked, never two modifications in the same bar."""
+    m = LadderExitManager()
+    p = pos()                                    # d=2
+    m.on_bar([p], bar(105.0, 0, lo=104.0, hi=105.5))   # N: r=2.5 (gap past both)
+    a = m.on_bar([p], bar(105.2, 1))
+    assert len(sls(a)) == 1
+    st = m._trades[p.ticket]
+    assert st.stage1_done is True and st.stage2_done is True
 
 
 # --------------------------------------------------------------------- #
-# 8. SHORT mirror: partials, final, BE tightens DOWN
+# 7. SHORT mirror
 # --------------------------------------------------------------------- #
 def test_short_ladder_and_final():
     m = LadderExitManager()
     p = pos(type=SHORT, price_open=100.0, sl=102.0)      # d=2
-    a = m.on_bar([p], close=90.0)                # r=5
+    a = m.on_bar([p], bar(90.0, 0))               # r=5
     pc = partials(a)
     assert len(pc) == 1 and abs(pc[0].volume - 0.40) < 1e-9
     apply(p, a)
-    a = m.on_bar([p], close=86.0)                # r=7
+    a = m.on_bar([p], bar(86.0, 1))               # r=7
     pc = partials(a)
     assert len(pc) == 1 and abs(pc[0].volume - 0.30) < 1e-9
     apply(p, a)
-    a = m.on_bar([p], close=80.0)                # r=10: final remainder
+    a = m.on_bar([p], bar(80.0, 2))               # r=10: final remainder
     pc = partials(a)
     assert len(pc) == 1 and abs(pc[0].volume - 0.30) < 1e-9
     assert p.ticket not in m._trades
 
 
-def test_short_breakeven_tightens_down():
-    m = LadderExitManager()
-    p = pos(type=SHORT, price_open=100.0, sl=102.0)
-    a = m.on_bar([p], close=96.0)                # r=2: BE
+def test_short_stage1_tightens_down():
+    m = LadderExitManager(spread=0.10, comm_per_lot=7.0, value_per_move=100.0)
+    p = pos(type=SHORT, price_open=100.0, sl=102.0)      # d=2
+    m.on_bar([p], bar(98.0, 0))                   # N: r=1
+    a = m.on_bar([p], bar(97.0, 1))                # X confirms
     s = sls(a)
-    assert len(s) == 1 and abs(s[0].sl - 100.0) < 1e-9   # 100 < 102: tighter
+    assert len(s) == 1
+    expected = 100.0 - 0.10 - 7.0 / 100.0
+    assert abs(s[0].sl - expected) < 1e-9
     apply(p, a)
-    a = m.on_bar([p], close=97.0)                # r=1.5: floor holds
+    a = m.on_bar([p], bar(99.0, 2))                # drifts back: floor holds
     assert sls(a) == []
 
 
+def test_short_stage2_locks_from_candle_n_high():
+    m = LadderExitManager(stage2_buffer=0.5, stage2_min_lock_r=1.0)
+    p = pos(type=SHORT, price_open=100.0, sl=102.0)      # d=2
+    m.on_bar([p], bar(96.0, 0, lo=95.5, hi=97.0))  # N: r=2, high=97.0
+    a = m.on_bar([p], bar(95.8, 1))                 # X confirms
+    s = sls(a)
+    assert len(s) == 1 and abs(s[0].sl - 97.5) < 1e-9    # 97.0 + 0.5
+
+
 # --------------------------------------------------------------------- #
-# 9. volume snapping + silent skip of unfillable rungs
+# 8. volume snapping + silent skip of unfillable rungs
 # --------------------------------------------------------------------- #
 def test_volume_snap_down():
-    m = LadderExitManager(final_tp_r=0.0, be_at_r=0.0)
+    m = LadderExitManager(final_tp_r=0.0)
     p = pos(volume=0.05)
-    a = m.on_bar([p], close=110.0)               # r=5: 0.05*0.40=0.02
+    a = m.on_bar([p], bar(110.0, 0))              # r=5: 0.05*0.40=0.02
     pc = partials(a)
     assert len(pc) == 1 and abs(pc[0].volume - 0.02) < 1e-9
 
 
 def test_unfillable_partial_skipped_silently():
-    m = LadderExitManager(final_tp_r=0.0, be_at_r=0.0)
-    p = pos(volume=0.01)                         # 0.01*0.40 snaps to 0.0
-    a = m.on_bar([p], close=110.0)
+    m = LadderExitManager(final_tp_r=0.0)
+    p = pos(volume=0.01)                          # 0.01*0.40 snaps to 0.0
+    a = m.on_bar([p], bar(110.0, 0))
     assert partials(a) == []
-    a = m.on_bar([p], close=110.0)               # marked filled, stays quiet
+    a = m.on_bar([p], bar(110.0, 1))               # marked filled, stays quiet
     assert partials(a) == []
 
 
 # --------------------------------------------------------------------- #
-# 10. closed-ticket cleanup + fresh recapture
+# 9. closed-ticket cleanup + fresh recapture
 # --------------------------------------------------------------------- #
 def test_closed_tickets_forgotten_and_recaptured():
     m = LadderExitManager()
     p = pos()
-    m.on_bar([p], close=101.0)
+    m.on_bar([p], bar(101.0, 0))
     assert p.ticket in m._trades
-    m.on_bar([], close=101.0)
+    m.on_bar([], bar(101.0, 1))
     assert p.ticket not in m._trades
-    p2 = pos(sl=97.0)                            # same ticket, new sl -> d=3
-    m.on_bar([p2], close=101.0)
+    p2 = pos(sl=97.0)                             # same ticket, new sl -> d=3
+    m.on_bar([p2], bar(101.0, 2))
     assert abs(m._trades[p2.ticket].d - 3.0) < 1e-9
 
 
 # --------------------------------------------------------------------- #
-# 11. emitted objects are orb.babysitter.Action instances
+# 10. emitted objects are orb.babysitter.Action instances
 # --------------------------------------------------------------------- #
 def test_emits_babysitter_actions():
     m = LadderExitManager()
     p = pos()
-    a = m.on_bar([p], close=110.0)
+    a = m.on_bar([p], bar(110.0, 0))
     assert a and all(isinstance(x, Action) for x in a)
+
+
+def test_supports_candle_flag():
+    assert LadderExitManager.SUPPORTS_CANDLE is True

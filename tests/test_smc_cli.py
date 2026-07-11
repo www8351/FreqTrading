@@ -70,7 +70,11 @@ class FakeMt5:
 def _smc_args(**ov):
     base = dict(session_len=None, smc_min_confluences=None, smc_risk_pct=None,
                 smc_disp_atr_mult=None, smc_poc_tol=None, smc_stop_max_dist=None,
-                smc_max_trades_per_day=None, smc_trail_mode=None, smc_final_tp_r=None,
+                smc_max_trades_per_day=None, smc_final_tp_r=None,
+                smc_stage1_at_r=None, smc_stage2_at_r=None,
+                smc_stage2_min_lock_r=None, smc_comm_per_lot=None,
+                smc_stop_buffer=None, smc_ticks_per_row=None,
+                smc_trigger_tf_min=None,
                 long_only=False, short_only=False, session_open=None)
     base.update(ov)
     return Namespace(**base)
@@ -86,11 +90,30 @@ def test_build_smc_config_maps_flags():
     cfg = build_smc_config(_smc_args(
         smc_min_confluences=4, smc_risk_pct=1.5, smc_disp_atr_mult=1.5,
         smc_poc_tol=3.0, smc_stop_max_dist=12.0, smc_max_trades_per_day=1,
-        smc_trail_mode="atr", smc_final_tp_r=8.0))
+        smc_final_tp_r=8.0, smc_stage1_at_r=1.5, smc_stage2_at_r=3.0,
+        smc_stage2_min_lock_r=2.0, smc_comm_per_lot=5.0))
     assert cfg.min_confluences == 4 and cfg.risk_pct == 1.5
     assert cfg.disp_atr_mult == 1.5 and cfg.poc_tol == 3.0
     assert cfg.stop_max_dist == 12.0 and cfg.max_trades_per_day == 1
-    assert cfg.trail_mode == "atr" and cfg.final_tp_r == 8.0
+    assert cfg.final_tp_r == 8.0
+    assert cfg.stage1_at_r == 1.5 and cfg.stage2_at_r == 3.0
+    assert cfg.stage2_min_lock_r == 2.0 and cfg.comm_per_lot == 5.0
+
+
+def test_build_smc_config_maps_btc_scale_flags():
+    # BTC-scale knobs: structural-stop buffer + profile row granularity
+    cfg = build_smc_config(_smc_args(
+        smc_stop_buffer=40.0, smc_ticks_per_row=3000,
+        smc_stop_max_dist=1500.0, smc_poc_tol=60.0))
+    assert cfg.stop_buffer == 40.0
+    assert cfg.ticks_per_row == 3000
+    assert cfg.row_size == 30.0          # 3000 ticks * 0.01 tick_size
+    assert cfg.stop_max_dist == 1500.0 and cfg.poc_tol == 60.0
+
+
+def test_build_smc_config_maps_trigger_tf_min():
+    cfg = build_smc_config(_smc_args(smc_trigger_tf_min=45))
+    assert cfg.trigger_tf_min == 45
 
 
 def test_build_smc_config_defaults():
@@ -98,8 +121,32 @@ def test_build_smc_config_defaults():
     d = SmcConfig()
     assert cfg.min_confluences == d.min_confluences
     assert cfg.risk_pct == d.risk_pct
-    assert cfg.trail_mode == d.trail_mode
     assert cfg.final_tp_r == d.final_tp_r
+    assert cfg.stage1_at_r == d.stage1_at_r
+    assert cfg.stage2_at_r == d.stage2_at_r
+    assert cfg.stop_buffer == d.stop_buffer
+    assert cfg.ticks_per_row == d.ticks_per_row
+    assert cfg.trigger_tf_min == d.trigger_tf_min
+
+
+def test_live_parser_has_btc_scale_smc_flags():
+    from orb.cli import build_parser
+
+    args = build_parser().parse_args([
+        "live", "--smc-stop-buffer", "40", "--smc-ticks-per-row", "3000"])
+    assert args.smc_stop_buffer == 40.0
+    assert args.smc_ticks_per_row == 3000
+    d = build_parser().parse_args(["live"])
+    assert d.smc_stop_buffer is None and d.smc_ticks_per_row is None
+
+
+def test_live_parser_has_trigger_tf_min_flag():
+    from orb.cli import build_parser
+
+    args = build_parser().parse_args(["live", "--smc-trigger-tf-min", "60"])
+    assert args.smc_trigger_tf_min == 60
+    d = build_parser().parse_args(["live"])
+    assert d.smc_trigger_tf_min is None
 
 
 def test_smc_broker_magic_server_tp_and_entry_mode():
@@ -139,16 +186,14 @@ def test_ladder_exit_manager_built_from_smc_config():
     cfg = SmcConfig()
     ladder = LadderExitManager(
         partial_levels=cfg.partial_levels, final_tp_r=cfg.final_tp_r,
-        be_at_r=cfg.be_at_r, trail_start_r=cfg.trail_start_r,
-        trail_mode=cfg.trail_mode, trail_atr_mult=cfg.trail_atr_mult,
-        trail_buffer=cfg.trail_buffer, swing_lookback=cfg.swing_lookback,
-        atr_period=cfg.atr_period, trail_tf_min=cfg.trigger_tf_min)
-    # observe() is the smc-specific method absent on Babysitter
-    assert hasattr(ladder, "observe")
-    ladder.observe(Candle(ts=TS, open=2000.0, high=2001.0, low=1999.0,
-                          close=2000.5, volume=10.0))
+        stage1_at_r=cfg.stage1_at_r, stage2_at_r=cfg.stage2_at_r,
+        stage2_min_lock_r=cfg.stage2_min_lock_r, stage2_buffer=cfg.stop_buffer,
+        comm_per_lot=cfg.comm_per_lot)
+    # SUPPORTS_CANDLE is the smc-specific marker absent on Babysitter
+    assert LadderExitManager.SUPPORTS_CANDLE is True
     # no positions -> no actions, clean pass
-    assert ladder.on_bar([], 2000.5) == []
+    assert ladder.on_bar([], Candle(ts=TS, open=2000.0, high=2001.0,
+                                    low=1999.0, close=2000.5, volume=10.0)) == []
 
 
 def test_smc_engine_replay_runs():

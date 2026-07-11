@@ -23,7 +23,7 @@ class SmcConfigError(ConfigError, ValueError):
 @dataclass(frozen=True, slots=True)
 class SmcConfig:
     # timeframes (minutes)
-    trigger_tf_min: int = 15
+    trigger_tf_min: int = 30
     htf_min: int = 240
     d1_min: int = 1440
 
@@ -59,11 +59,15 @@ class SmcConfig:
     # exits (ladder): ((r_multiple, close_fraction), ...) ascending in r
     partial_levels: tuple = ((5.0, 0.40), (7.0, 0.30))
     final_tp_r: float = 10.0         # 0 = no final TP (runner trails out)
-    be_at_r: float = 2.0             # move stop to entry at this R
-    trail_start_r: float = 2.0       # start trailing at this R (independent of BE)
-    trail_mode: str = "swing"        # "swing" | "atr"
-    trail_atr_mult: float = 2.5
-    trail_buffer: float = 0.5        # beyond the trailed swing
+
+    # two-stage discrete SL (max 2 modifications per position lifetime,
+    # both tighten-only; confirmed on the N+1 CLOSED trigger-TF candle — see
+    # LadderExitManager). Stage 1 = breakeven + round-trip costs. Stage 2 =
+    # final profit lock at candle N's low/high (floored), then frozen forever.
+    stage1_at_r: float = 1.0         # BE+costs trigger (candle N close >= this R)
+    stage2_at_r: float = 2.0         # final-lock trigger (candle N close >= this R)
+    stage2_min_lock_r: float = 1.0   # stage2 SL floor, in R, never looser than this
+    comm_per_lot: float = 7.0        # $ round-trip commission/lot (XAUUSD ~ $0.07 @ $100/move)
 
     # plumbing
     strict_monotonic: bool = True
@@ -82,13 +86,11 @@ class SmcConfig:
             raise SmcConfigError("poc_tol must be >= 0")
         if not (0.0 < self.disp_body_frac < 1.0):
             raise SmcConfigError("disp_body_frac must be in (0, 1)")
-        for nm in ("disp_atr_mult", "vol_mult", "trail_atr_mult"):
+        for nm in ("disp_atr_mult", "vol_mult"):
             if getattr(self, nm) <= 0:
                 raise SmcConfigError(f"{nm} must be > 0")
         if not (0.0 < self.risk_pct <= 10.0):
             raise SmcConfigError("risk_pct must be in (0, 10]")
-        if self.trail_mode not in ("swing", "atr"):
-            raise SmcConfigError("trail_mode must be 'swing' or 'atr'")
         if not (self.trigger_tf_min < self.htf_min < self.d1_min):
             raise SmcConfigError("timeframes must satisfy trigger_tf_min < htf_min < d1_min")
         if self.d1_min != 1440:
@@ -111,12 +113,14 @@ class SmcConfig:
             raise SmcConfigError("final_tp_r must be 0 (off) or > the last partial r")
         if self.final_tp_r < 0:
             raise SmcConfigError("final_tp_r must be >= 0")
-        if self.be_at_r <= 0:
-            raise SmcConfigError("be_at_r must be > 0")
-        if self.trail_start_r <= 0:
-            raise SmcConfigError("trail_start_r must be > 0")
-        if self.trail_buffer < 0:
-            raise SmcConfigError("trail_buffer must be >= 0")
+        if self.stage1_at_r <= 0:
+            raise SmcConfigError("stage1_at_r must be > 0")
+        if self.stage2_at_r <= self.stage1_at_r:
+            raise SmcConfigError("stage2_at_r must be > stage1_at_r")
+        if self.stage2_min_lock_r <= 0:
+            raise SmcConfigError("stage2_min_lock_r must be > 0")
+        if self.comm_per_lot < 0:
+            raise SmcConfigError("comm_per_lot must be >= 0")
         if self.stop_buffer <= 0:
             raise SmcConfigError("stop_buffer must be > 0")
         if self.stop_max_dist <= self.stop_buffer:

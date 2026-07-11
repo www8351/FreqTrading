@@ -1,5 +1,191 @@
 # DECISIONS
 
+## D-031 — Multi-year/multi-TF SMC re-test surfaced 3 bugs; fixed all 3, gold spread convention corrected
+- **Date:** 2026-07-05
+- **Context:** Owner asked to re-backtest SMC on the new M30 gold data (from the 4yr multi-TF
+  candle pull, see STATUS), then to isolate the TF-granularity effect by running the same window
+  at H1/H2/H4/M45/M90, across XAUUSD/US100/BTCUSD. Building that grid surfaced three real bugs.
+- **Bug 1 — `aggregate_candles` (`scripts/sim_realistic.py`) broke for `minutes >= 60`.** It floored
+  only `c.ts.minute`, never the hour, so H1/H2/H4/M90 (all >=60min) all collapsed to a plain
+  hourly truncation — silently IDENTICAL output regardless of the requested size. Never caught
+  before because the only prior caller (`svp --timeframe`) tops out at 15m (`_TF_MINUTES`). Fixed
+  to floor on minutes-since-midnight (matches the already-correct `orb/smc/mtf.py`
+  `TimeframeAggregator._bucket`), verified bar counts now scale monotonically with TF size.
+  625/625 tests still green (no test locked in the old behavior).
+- **Bug 2 — SMC backtests used the RETIRED $1.10 gold spread, not the corrected real ~$0.10
+  (D-019).** D-019 explicitly retired $1.10 as "the wrong pip-conversion" for SVP; that correction
+  was never applied to the SMC harness — every SMC verdict on record (D-027 PF 0.46/0.15, D-029 PF
+  0.09, and this session's own first M30 re-test PF 1.49) was run at a cost ~11x the real measured
+  spread (`check_spread.py XAUUSD.ecn` right now: median $0.09). **Decision: use real measured
+  per-symbol spread going forward for SMC** (gold $0.09, US100 $0.6 median — already D-025's
+  established value, BTCUSD $6.0 — first measurement, flat/fixed-looking on this demo account,
+  flagged as unverified-variability). Old PF numbers stand as historical record but are understood
+  to be pessimistically biased; not retroactively restated here.
+- **Bug 3 — `SmcConfig` defaults (`stop_max_dist=15`, `poc_tol=2`, `stop_buffer=0.5`,
+  `ticks_per_row=100`) are GOLD-SCALED and silently zero out entries on other instruments** — the
+  same class of bug as D-025's "gold stops on US100". First grid run gave BTCUSD **n=0 on every
+  timeframe** (every structural stop > $15 on a ~$62k instrument gets rejected as "too wide").
+  **Fixed via `scripts/backtest_tf_grid.py` `SMC_OVERRIDES`:** BTCUSD reuses the owner's own
+  live-deploy calibration (`--smc-stop-max-dist 1500 --smc-poc-tol 60 --smc-stop-buffer 40
+  --smc-ticks-per-row 3000`, STATUS 2026-07-05 BTCUSD entry) — not a new guess. US100 has no prior
+  SMC calibration anywhere in the codebase, so a first-pass ATR-ratio-scaled estimate was used
+  (measured ATR_m5 ratio to gold, `symbol_specs.py`, ≈4.94x → stop_max_dist=75/poc_tol=10/
+  stop_buffer=2.5/ticks_per_row=500) — **explicitly flagged as unvalidated**, unlike BTC's numbers.
+- **Not decided / open:** whether US100's estimated SMC config is good enough to trust, whether
+  the grid results (single full-window per symbol/TF, no OOS split) indicate anything robust, and
+  whether to re-run the earlier gold-only verdicts (D-027/D-029/this session's M30 test) at the
+  corrected real spread. Revisit only if the owner wants to invest further in this thread.
+
+## D-032 — Reverses D-030's "no auto-recovery": BTCUSD.ecn added to the bots.ps1 keeper
+- **Date:** 2026-07-05
+- **Context:** D-030 explicitly locked "no automatic recovery when MT5 closes" for the BTCUSD SMC
+  demo bot — closing the terminal was meant to stop it, and adding a `bots.ps1` `$ENABLED` entry was
+  explicitly REJECTED at the time ("the keeper's 60s respawn is exactly the auto-recovery the owner
+  declined"). Owner has now reversed that call.
+- **Decision:** `scripts/bots.ps1` `$ENABLED` gains a BTCUSD.ecn entry (`--source
+  orb.feeds.mt5feed:btcusd_live --broker mt5 --strategy smc --symbol BTCUSD.ecn --warmup-gate
+  --smc-stop-max-dist 1500 --smc-poc-tol 60 --smc-stop-buffer 40 --smc-ticks-per-row 3000
+  --smc-comm-per-lot 0`) alongside the existing US100 ORB entry. The keeper now auto-restarts BOTH
+  bots on crash/MT5-restart; the header comment updated from "US100 + BTCUSD.ecn (SMC)" only.
+- **Still true from D-030, unchanged:** no daily loss cap on the BTC bot, no backtest gate, no
+  profitability claim — this reversal is scoped ONLY to the auto-recovery mechanism, not the other
+  D-030 terms. `--warmup-gate` still suppresses signals during history replay after any
+  keeper-triggered restart, so a respawn won't fire stale signals.
+- **Status: final until revisited.** If the owner wants no-auto-recovery back, remove the
+  `$ENABLED` entry (`bots.ps1 restart` picks it up) — do not re-add the "no keeper" language to
+  D-030 without a corresponding decision entry here, to avoid the log contradicting the code again.
+
+## D-030 — SMC goes live-on-demo on BTCUSD.ecn (Python bot, feed warmup + warmup gate; owner skipped the backtest gate)
+- **Date:** 2026-07-05
+- **Context:** Owner wants the SMC system trading Bitcoin ("the one to trade, 24/7") on the MT5
+  **demo** account, starting immediately, explicitly **without** a BTC backtest. The D-029 honest
+  gold verdict (PF 0.09) stands on record; running BTC on demo implies **no profitability claim** —
+  it is a live-forward measurement on a new instrument (the "different instrument" lever D-020
+  pointed to), scored later by `scripts/live_report.py --magic 20260621`.
+- **Owner decisions (locked via Q&A):**
+  1. **Vehicle = the Python live bot** (`--strategy smc`, magic 20260621). The MQL5 EA is OUT for
+     now: `mql5/SmcXau_EA.mq5` was deleted from the working tree, the D-029 EA rewrite was never
+     committed (HEAD holds the old M15/trailing variant), and the committed `.ex5` binary predates
+     the refactor. EA restore/adaptation = parked as a separate future task.
+  2. **No daily loss cap** — `--max-daily-loss` omitted; the breaker is simply not constructed.
+  3. **No automatic recovery when MT5 closes** — the bot must NOT be kept alive by the
+     `bots.ps1` keeper, and closing the terminal must stop it. Implemented as bounded reconnects
+     in the feed (below); `scripts/bots.ps1` deliberately untouched (rejected: adding a BTC entry
+     to `$ENABLED` — the keeper's 60s respawn is exactly the auto-recovery the owner declined).
+- **Built (all additive, default-off; 608 → 625 tests green, ORB/SVP live paths byte-unchanged,
+  pinned by the Part-2 spy test + new regression pins):**
+  - `orb/feeds/mt5feed.py` `stream_candles(warmup_bars=0, max_reconnect_attempts=None)`:
+    `warmup_bars` enlarges the FIRST successful fetch to `warmup_bars+3` so recent M1 history
+    replays once before live polling (SMC H4/D1 bias armed at launch instead of dormant for days —
+    the feed previously had zero backfill). Short-fetch tolerated (terminal chart cap) — logged
+    `warmup_backfill requested/got`. If the replay itself takes ≥60s, ONE extra enlarged fetch
+    covers bars closed meanwhile; `last_emitted` dedupes. `max_reconnect_attempts` bounds
+    CONSECUTIVE FAILED `_reconnect` tries and then raises `Mt5FeedError` → process exits (the
+    owner's "closing MT5 stops the bot"); success resets the counter; default `None` = the old
+    infinite retry. New factory `btcusd_live()` = BTCUSD.ecn, warmup 43200 (30 days ≈ 180 H4 /
+    30 D1 bars), max_reconnect_attempts 3.
+  - `orb/cli.py` `--warmup-gate` (default off): while replayed candles are older than process
+    start, engine state builds but NOTHING reaches the broker — `on_signal` suppresses ALL signal
+    kinds to stderr as `# WARMUP_SIG` (a stale EXIT would market-close real positions; stdout
+    signals log stays tradable-only), and `on_bar` returns before every broker read/write
+    (breaker/macro/sitter/force-flat sync — also avoids ~43k blocking IPC calls during replay).
+    First fresh candle prints `# WARMUP_DONE bars=N suppressed_signals=M` and disarms. Graces:
+    bars 3 min; signals `trigger_tf+2` min for smc because **`Signal.ts` is the trigger-TF bar
+    OPEN** (a live M30 signal is legitimately up to ~31 min old) — a naive 2-min check would
+    suppress the first real entry. Gate is opt-in because the CLI test harness drives `main()`
+    with fixed 2026-06-10 candles; `_utcnow()` is module-level for test pinning.
+  - `orb/cli.py` `--smc-stop-buffer` / `--smc-ticks-per-row` (the two SmcConfig knobs that had no
+    flags) — BTC scale is fully flag-driven, no per-symbol preset machinery.
+  - `scripts/symbol_specs.py`: BTCUSD.ecn added to the dump universe.
+- **Known accepted semantics:** a suppressed warmup ENTRY leaves the engine in BREAKOUT; the
+  existing flat-sync `force_flat`s it on the first fresh bar (one cosmetic `broker_closed` EXIT
+  print). `_traded_today` counting phantom warmup entries is conservative-correct. Warmup replays
+  consume OBs exactly as an always-running bot would.
+- **Initial BTC calibration (flags in the run command, verify at deploy):** stop_max_dist **1500**
+  (~1.5% of ~$100k; gold's 15 ≈ 0.45% of $3.3k, BTC vol 2-3×), poc_tol **60** (= 2 rows),
+  ticks_per_row **3000** ($30 rows), stop_buffer **40** (must exceed real spread — check
+  `check_spread.py BTCUSD.ecn`; it is also the ladder's fallback spread + stage2 buffer),
+  comm_per_lot **0** (JustMarkets crypto is typically spread-only — verify on the first demo deal).
+  Sizing/ladder auto-adapt via `broker.symbol_specs()` (value_per_move, volume min/step/max) and
+  live `current_spread()` — no code assumption carries gold units at runtime.
+- **Rejected:** per-symbol config presets (flags + documented command are enough, no new
+  machinery); `--resolve-symbol` for this bot (feed symbol is hardcoded in the factory — a
+  resolver rewrite of `args.symbol` could silently split feed and broker across two symbol
+  variants); running the stale `.ex5` EA on a BTC chart (wrong strategy variant, gold-scale
+  inputs).
+- **Status:** built + tested; deploy = calibrate (symbol_specs / check_spread), foreground smoke
+  run, then detached `Start-Process` (commands in STATUS). Revisit calibration values after the
+  first live trades; EA parity for BTC is a separate future decision.
+
+## D-029 — SMC two-stage discrete SL refactor: trailing removed, M15→M30 trigger, EA copy-trade broadcast implemented
+- **Date:** 2026-07-05
+- **Context:** Owner-specified refactor of the SMC exit/entry layer (Part 1 EA + `orb/smc/`), all
+  decisions pre-locked. Scope: `mql5/SmcXau_EA.mq5` and `orb/smc/` (1:1 parity), plus the minimum
+  plumbing outside that boundary needed to wire it (`scripts/sim_realistic.py`, `orb/cli.py`
+  is-smc-only branches). `orb/babysitter.py`, `orb/engine.py`, and anything the live ORB bots
+  (US100/XAUUSD, magics 20260610/11) use were NOT touched.
+- **Decided / built:**
+  1. **Trailing removed completely.** EA: deleted `TrailCandidate()`, the trail block in
+     `ManageOpenPositions()`, and `InpTrailStartR`/`InpTrailMode`/`InpTrailAtrMult`/`InpTrailBuffer`.
+     Python: deleted `LadderExitManager._trail()`, the trail branch of `on_bar`, `observe()`, and
+     all `trail_*`/`be_at_r` `SmcConfig` fields (and the now-unused `TimeframeAggregator`/
+     `StructureTracker`/`WilderATR` imports in `exits.py` — the ladder no longer needs any TF
+     aggregation since trailing was its only consumer).
+  2. **Two-stage discrete SL** (max 2 modifications per position lifetime, both tighten-only):
+     stage 1 at `stage1_at_r` (default 1.0R) = breakeven + round-trip costs (spread +
+     `comm_per_lot`/`value_per_move`); stage 2 at `stage2_at_r` (default 2.0R) = candle N's
+     low/high ∓ buffer, floored to `stage2_min_lock_r` (default 1.0R) from entry, then FROZEN
+     forever. A gap that clears both thresholds on the same candle N fires stage 2 directly and
+     marks both flags done — never two modifications in one bar. EA derives `stage1_done`/
+     `stage2_done` fresh every tick from current SL vs entry (no persistence); the original risk
+     distance `d` is recovered from the position's *opening order's* SL in history (not the
+     current, possibly-modified, position SL) via `OriginalStopFromHistory` — restart-safe.
+  3. **N+1 confirmation, closed candles only.** EA: stateless, re-evaluates M1 shift-2
+     (`iClose/iHigh/iLow(...,PERIOD_M1,2)`) fresh every new-M1-bar tick — shift 1 is guaranteed
+     closed by the existing strict new-bar gate. Python: `LadderExitManager.on_bar` signature
+     changed from `(positions, close)` to `(positions, candle)`; the manager keeps the previous
+     candle as candidate N, confirmed when the next candle X arrives (X = N+1). A
+     `SUPPORTS_CANDLE = True` class marker lets `scripts/sim_realistic.py`'s `Sim` and `orb/cli.py`
+     tell this manager apart from `Babysitter` (which still wants just `close`) without an
+     isinstance import cycle.
+  4. **Trigger timeframe M15 → M30** (owner decision). EA: entry recompute gate, `ScanStructure`,
+     ATR, volume SMA, CISD lookback, and the day-POC/equilibrium volume-profile rows all moved from
+     PERIOD_M15 to PERIOD_M30; M1 exit-management gate and H4 bias/D1 veto unchanged. Python:
+     `SmcConfig.trigger_tf_min` default 15 → 30 (`TimeframeAggregator` already generic over any
+     divisor of 1440, so no `mtf.py` code change was needed — only the default).
+  5. **Partials (5R/7R/10R) unchanged** — volume closes, not SL modifications, still evaluated on
+     the real-time current close, not gated by N+1.
+  6. **EA copy-trade broadcast implemented** (was spec-only before this). Schema-version-1 JSON
+     (`open`/`modify_sl`/`partial_close`/`close` actions), HMAC-SHA256 per RFC 2104 built on
+     `CryptEncode(CRYPT_HASH_SHA256, ...)` (MQL5 has no native HMAC — confirmed in
+     `docs/copytrade_schema.md` §5), signed over `"<ts>.<body>"`, sent via `WebRequest` with
+     `X-Timestamp`/`X-Signature` headers. Events are queued in-memory (`BcEnqueue`, capped at 500,
+     drops oldest) at the point of action and flushed one-per-tick from `OnTimer(1)` (`BcFlush`,
+     up to 5 retries then drop-and-log) — the trade path itself never touches the network. Requires
+     `InpBroadcastUrl` whitelisted in *Tools → Options → Expert Advisors → Allow WebRequest*, and
+     is off entirely when `InpBroadcastUrl` is empty. Python-side broadcast already worked
+     (D-028) — no changes needed there beyond routing the new stage SL calls through the existing
+     `broker.modify_sl`/`update_stop` wrappers, which they already do since they're the same
+     `Action("update_sl", ...)` path the old BE/trail code used.
+- **Rejected:** persisting stage-done flags to disk (history-derived recomputation is simpler and
+  matches the file's existing restart-safety idiom, e.g. `OriginalVolumeFromHistory`); emitting
+  broadcast events from `OnTradeTransaction` as `docs/copytrade_schema.md` §5 originally suggested
+  (owner's explicit spec for *this* refactor is enqueue-in-place + flush-on-`OnTimer(1)`, which is
+  simpler to reason about statelessly and still fully non-blocking).
+- **Verdict — honest backtest, NEW numbers, OLD verdict (D-027, PF 0.15–0.46) VOID:**
+  `python scripts/sim_realistic.py data/xauusd_1m_20260303_20260612.csv --strategy smc --spread 1.10
+  --start-balance 1000` (14-week window): **n=52, net=-$519.63, PF=0.09, win%=19.2, avg_win=$5.01,
+  avg_loss=$13.57, max_dd=52.1%.** Worse than the pre-refactor M15/trail variant on this window —
+  the M30 trigger fires far less often and the tight stage-2 lock (floor at only 1R) cuts winners
+  short before the 5R/7R/10R ladder can pay for the losers. This is a *different* variant (M30
+  entries + discrete two-stage exits, not M15 + continuous trail) so D-027's number does not carry
+  over either way; no profitability claim is implied by this refactor.
+- **Status:** Python side complete, 608/608 tests green (up from the 588 baseline: +20 net after
+  removing all trail tests and adding two-stage/N+1/gap tests). EA rewritten in full
+  (`mql5/SmcXau_EA.mq5`, brace/paren-balance sanity-checked outside comments/strings — owner must
+  still F7-compile in MetaEditor; no compiler was available in this session). Not live — same as
+  D-027, this is a standalone build/refactor, armed but not enabled on any running bot.
+
 ## D-028 — Production execution layer + copy-trade broadcast (Part 2, flag-gated, default off)
 - **Date:** 2026-07-04
 - **Context:** Owner spec §4-6 (companion to the Part 1 SMC build, D-027): dynamic spread gate,
@@ -705,3 +891,70 @@
   weekend staleness >=~40h; clean separation).
 - **Status:** Final. Added `now_fn` clock injection + regression test
   `test_auto_offset_defers_on_stale_bars`. 91 tests green.
+
+## D-033 (2026-07-07): all 5 symbols live (demo) on SMC — M15, XAUUSD M30 (user-directed, UNVALIDATED)
+- **Decision:** On explicit owner request ("check status, run all 5 — BTCUSD US100
+  XAUUSD US500 XAGUSD, no test, activate now, M15 on all, XAUUSD M30, go"), the
+  `bots.ps1` keeper's `$ENABLED` was rewritten from {US100 ORB, BTCUSD SMC} to **all
+  5 on the SMC strategy**: trigger TF **M15** for US100/US500/XAGUSD/BTCUSD, **M30**
+  for XAUUSD. Launched on JustMarkets-Demo3 (demo=True, balance $520), no --macro-mode,
+  all `--warmup-gate --smc-comm-per-lot 0`.
+- **SMC scale params:** XAUUSD = gold defaults (poc 2 / buf 0.5 / max 15 / rows 100);
+  BTCUSD = existing tuned (60/40/1500/3000). US100/US500/XAGUSD = **auto-derived by
+  price-ratio vs gold 4115** (all `SmcConfig`-validated, row sizes sane):
+  US100 (×7.10) poc 14 / buf 3.5 / max 105 / rows 700;
+  US500 (×1.83) poc 3.6 / buf 0.9 / max 27 / rows 180;
+  XAGUSD (×0.0147) poc 0.03 / buf 0.02 / max 0.4 / rows 3.
+  US100 poc-tol 14 **corrects the D-031 first-pass guess of 10**.
+- **Feeds:** added 30d M1 warmup + bounded reconnect(3) to `xauusd_live/us100_live/
+  us500_live/xagusd_live` (mirrors `btcusd_live`; verified no test asserts their
+  kwargs, only `test_btcusd_live_factory`). Warmup arms the SMC H4/D1 bias at launch —
+  all 5 backfilled 43k bars, `WARMUP_DONE` once each, the historical entry correctly
+  suppressed by `--warmup-gate`.
+- **Why:** direct owner order on a demo account (reversible, ~$10 risk/trade at
+  risk_pct 2%). Not a research/edge decision.
+- **Rejected:** (a) gold-default scale on all 5 — would zero-trade the index/silver
+  symbols (D-031/D-025 scale bug); (b) keeping US100 on ORB.
+- **Caveats / RISK (recorded, not resolved):** this **contradicts D-020** (XAUUSD/
+  US500/XAGUSD flagged no replicable edge) and **abandons US100 ORB, the only
+  positive-edge strategy on record**, for SMC. The 3 derived configs have **no
+  backtest** — pure price-ratio guesses. `tick_size` is hardcoded 0.01 for all (not a
+  CLI flag); index/silver quotes round to 2dp, accepted. Demo only — **do not treat as
+  live-money ready**; validate with backtests first.
+- **Ops notes (this session):** (1) one bot = **2 python.exe** (main + worker/IPC child,
+  child parented by main) — normal footprint; keeper `Test-Alive` (existence check)
+  tolerates it; do NOT kill "duplicates". (2) `Enable/Disable-ScheduledTask` return
+  **Access is denied** (needs elevation) — control the keeper via the `STOP_TRADING`
+  file + `Start-ScheduledTask` instead; task `MultipleInstances=IgnoreNew` so only one
+  watch loop runs. (3) A shell command-guard blocks `Remove-Item` lines that also
+  contain a `\S+`-style token — let `bots.ps1 on` do the STOP-file removal internally.
+- **Status:** Live (demo), all 5 alive+feeding under one keeper. Feed currently closed
+  (`market_live=False` on every symbol incl. 24/7 BTC) so they idle armed and will fire
+  when quotes resume. Revisitable — the whole expansion is unvalidated.
+
+## D-034 (2026-07-08): feed staleness watchdog (silent stale-feed stall fix)
+- **Trigger:** overnight, all 5 bots went silent for ~7h — every engine log froze at the
+  warmup instant (2026-07-07T20:30Z) while a FRESH `mt5.initialize()` showed current bars.
+  Root cause: the machine/terminal suspended overnight and the long-running feed connections
+  returned STALE-but-present bars (old data, NO error). `stream_candles` only reconnects on a
+  no-rates *error*, so a stale-no-error feed never tripped it; `Test-Feeding`/keeper saw a live
+  proc and never respawned. (Also confirmed the terminal streams live 24/7 for BTC via a direct
+  `copy_rates` probe: +60s/bar — so it was the bot's connection, not the market.)
+- **Decision:** added a `stale_reconnect_sec` watchdog to `orb/feeds/mt5feed.py`
+  `stream_candles` (default `0.0` = OFF, so the default path is byte-unchanged). When armed: if
+  no NEW closed bar for `stale_reconnect_sec` AND the last bar is younger than
+  `STALE_MARKET_CLOSED_SEC` (15h — else it's a weekend/close and silence is expected), force a
+  `_reconnect` to refresh the link; the timer reset throttles it to ≤1 reconnect/interval and
+  reuses the existing `max_reconnect_attempts` exit path if reconnect truly fails. Wired into the
+  factories: **BTC 300s** (24/7 — a 5-min gap is a stall), **CFDs 3900s** (just over the ~1h
+  daily rollover break so normal breaks don't churn).
+- **Why (owner chose "build watchdog"):** the keeper can't see a silent stall; a self-healing
+  feed keeps demo bots alive across overnight suspends without manual `bots.ps1 restart`.
+- **Rejected:** (a) keep-machine-awake only (no code fix, ignores the gap); (b) leave-as-is +
+  manual restart; (c) RAISE on staleness instead of reconnect — rejected because it would crash-
+  loop the keeper into a full 43k-bar warmup re-fetch every interval during any long quiet.
+- **Tests:** TDD, 4 new in `tests/test_feed_mt5.py` (forces-reconnect+resumes, skips-when-market-
+  closed, off-by-default, CFD factory wiring) + updated `test_btcusd_live_factory`. 631 green.
+- **Status:** Final. Running bots restarted to load it. Latent follow-up: the ~1h daily CFD break
+  is still below any useful mid-session threshold — a break longer than 65min would trigger
+  (harmless) reconnect churn; revisit with session-calendar awareness if it matters.

@@ -78,11 +78,15 @@ class Sim:
     """Broker+market simulator for one candle stream."""
 
     def __init__(self, qty: float, spread: float, commission_rt: float,
-                 value_per_move: float = USD_PER_LOT_PER_DOLLAR):
+                 value_per_move: float = USD_PER_LOT_PER_DOLLAR,
+                 smc_ladder: bool = False):
         self.qty = qty
         self.half_spread = spread / 2.0
         self.comm = commission_rt      # $ per 1.0 lot round-trip
         self.value_per_move = value_per_move  # $ per 1.0 price move per lot
+        # LadderExitManager.on_bar wants the full candle (N+1 confirmation),
+        # Babysitter wants just the close — see LadderExitManager.SUPPORTS_CANDLE.
+        self.smc_ladder = smc_ladder
         self.pendings: list[Pending] = []
         self.positions: list[Position] = []
         self.closed: list[dict] = []
@@ -149,8 +153,9 @@ class Sim:
             if hit:
                 self._close(pos, pos.sl, pos.volume, "sl", c.ts)
 
-        # 4) babysitter on the close
-        for act in sitter.on_bar(self.positions, c.close):
+        # 4) babysitter (or smc ladder) on the close/candle
+        bar_arg = c if self.smc_ladder else c.close
+        for act in sitter.on_bar(self.positions, bar_arg):
             pos = next((p for p in self.positions if p.ticket == act.ticket),
                        None)
             if pos is None:
@@ -215,18 +220,25 @@ def load_csv(paths: list[str]) -> list[Candle]:
 
 
 def aggregate_candles(candles: list[Candle], minutes: int) -> list[Candle]:
-    """Aggregate 1m bars into N-minute bars, buckets aligned to the UTC hour
-    (5m at :00,:05,...; 15m at :00,:15,:30,:45). OHLC = first-open / max-high /
-    min-low / last-close, volume summed, bucket ts = bucket start. Time gaps
-    separate buckets naturally; the trailing partial bucket is emitted.
-    ``minutes <= 1`` is an identity pass."""
+    """Aggregate 1m bars into N-minute bars, buckets aligned to UTC midnight
+    (5m at :00,:05,...; 15m at :00,:15,:30,:45; H4 at 00/04/08/12/16/20).
+    OHLC = first-open / max-high / min-low / last-close, volume summed, bucket
+    ts = bucket start. Time gaps separate buckets naturally; the trailing
+    partial bucket is emitted. ``minutes <= 1`` is an identity pass.
+
+    Floors on minutes-since-midnight (not minute-of-hour) so ``minutes >= 60``
+    (H1/H2/H4/...) buckets correctly across hour boundaries -- flooring only
+    ``c.ts.minute`` would leave the hour untouched and collapse every
+    ``minutes >= 60`` to a plain hourly truncation (bug, fixed 2026-07-05)."""
     if minutes <= 1:
         return candles
     out: list[Candle] = []
     key: datetime | None = None
     o = h = l = cl = vol = 0.0
     for c in candles:
-        floored = c.ts.replace(minute=c.ts.minute - c.ts.minute % minutes,
+        mins = c.ts.hour * 60 + c.ts.minute
+        start = mins - mins % minutes
+        floored = c.ts.replace(hour=start // 60, minute=start % 60,
                                second=0, microsecond=0)
         if key is None:
             key, o, h, l, cl, vol = floored, c.open, c.high, c.low, c.close, c.volume
@@ -380,14 +392,13 @@ def run_smc(candles: list[Candle], *, risk_pct: float = 2.0, spread: float = 1.1
                     **{k: v for k, v in smc_ov.items() if k in valid})
     engine = SmcEngine(cfg)
     sim = Sim(qty=0.0, spread=spread, commission_rt=comm,
-              value_per_move=value_per_move)
+              value_per_move=value_per_move, smc_ladder=True)
     sitter = LadderExitManager(
         partial_levels=cfg.partial_levels, final_tp_r=cfg.final_tp_r,
-        be_at_r=cfg.be_at_r, trail_start_r=cfg.trail_start_r,
-        trail_mode=cfg.trail_mode, trail_atr_mult=cfg.trail_atr_mult,
-        trail_buffer=cfg.trail_buffer, swing_lookback=cfg.swing_lookback,
-        atr_period=cfg.atr_period, trail_tf_min=cfg.trigger_tf_min,
-        vol_min=vol_min, vol_step=vol_step)
+        stage1_at_r=cfg.stage1_at_r, stage2_at_r=cfg.stage2_at_r,
+        stage2_min_lock_r=cfg.stage2_min_lock_r, stage2_buffer=cfg.stop_buffer,
+        comm_per_lot=cfg.comm_per_lot, value_per_move=value_per_move,
+        spread=spread, vol_min=vol_min, vol_step=vol_step)
     spike = SpikeCancel(ratio=2.5)
     breaker = DailyLossBreaker(max_daily_loss_pct=max_daily_loss_pct)
 
@@ -401,7 +412,6 @@ def run_smc(candles: list[Candle], *, risk_pct: float = 2.0, spread: float = 1.1
         # flat — unlike SVP, which force-exits at each session boundary.
         if engine.position is not None and not sim.positions:
             engine.force_flat(c.ts)
-        sitter.observe(c)
         sig = engine.on_candle(c)
         bal = start_balance + sim.equity
         halted = breaker.update(c.ts.date(), bal)
@@ -541,11 +551,18 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="reject entries with a structural stop wider than this")
     ap.add_argument("--smc-max-trades-per-day", dest="smc_max_trades_per_day",
                     type=int, help="cap entries per UTC day (default 2)")
-    ap.add_argument("--smc-trail-mode", dest="smc_trail_mode",
-                    choices=("swing", "atr"),
-                    help="runner trail: swing structure or ATR (default swing)")
     ap.add_argument("--smc-final-tp-r", dest="smc_final_tp_r", type=float,
                     help="final take-profit R (0 = runner trails out; default 10)")
+    ap.add_argument("--smc-stage1-at-r", dest="smc_stage1_at_r", type=float,
+                    help="stage1 (BE+costs) SL trigger in R (default 1.0)")
+    ap.add_argument("--smc-stage2-at-r", dest="smc_stage2_at_r", type=float,
+                    help="stage2 (final profit lock) SL trigger in R (default 2.0)")
+    ap.add_argument("--smc-stage2-min-lock-r", dest="smc_stage2_min_lock_r",
+                    type=float,
+                    help="stage2 SL floor in R, never looser (default 1.0)")
+    ap.add_argument("--smc-comm-per-lot", dest="smc_comm_per_lot", type=float,
+                    help="$ round-trip commission/lot for stage1 cost buffer "
+                         "(default 7.0)")
     ap.add_argument("--emit-trades", dest="emit_trades",
                     help="write entry trades as JSON for scripts/backtest_macro.py")
     return ap
@@ -615,8 +632,11 @@ def main() -> None:
             ("poc_tol", args.smc_poc_tol),
             ("stop_max_dist", args.smc_stop_max_dist),
             ("max_trades_per_day", args.smc_max_trades_per_day),
-            ("trail_mode", args.smc_trail_mode),
             ("final_tp_r", args.smc_final_tp_r),
+            ("stage1_at_r", args.smc_stage1_at_r),
+            ("stage2_at_r", args.smc_stage2_at_r),
+            ("stage2_min_lock_r", args.smc_stage2_min_lock_r),
+            ("comm_per_lot", args.smc_comm_per_lot),
         ) if v is not None}
         print(f"# risk={args.smc_risk_pct}%/trade daily={args.max_daily_loss_pct}% "
               f"start=${sb:.0f}")
