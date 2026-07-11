@@ -74,6 +74,7 @@ def _smc_args(**ov):
                 smc_stage1_at_r=None, smc_stage2_at_r=None,
                 smc_stage2_min_lock_r=None, smc_comm_per_lot=None,
                 smc_stop_buffer=None, smc_ticks_per_row=None,
+                smc_trigger_tf_min=None,
                 long_only=False, short_only=False, session_open=None)
     base.update(ov)
     return Namespace(**base)
@@ -110,6 +111,11 @@ def test_build_smc_config_maps_btc_scale_flags():
     assert cfg.stop_max_dist == 1500.0 and cfg.poc_tol == 60.0
 
 
+def test_build_smc_config_maps_trigger_tf_min():
+    cfg = build_smc_config(_smc_args(smc_trigger_tf_min=45))
+    assert cfg.trigger_tf_min == 45
+
+
 def test_build_smc_config_defaults():
     cfg = build_smc_config(_smc_args())
     d = SmcConfig()
@@ -120,6 +126,7 @@ def test_build_smc_config_defaults():
     assert cfg.stage2_at_r == d.stage2_at_r
     assert cfg.stop_buffer == d.stop_buffer
     assert cfg.ticks_per_row == d.ticks_per_row
+    assert cfg.trigger_tf_min == d.trigger_tf_min
 
 
 def test_live_parser_has_btc_scale_smc_flags():
@@ -131,6 +138,15 @@ def test_live_parser_has_btc_scale_smc_flags():
     assert args.smc_ticks_per_row == 3000
     d = build_parser().parse_args(["live"])
     assert d.smc_stop_buffer is None and d.smc_ticks_per_row is None
+
+
+def test_live_parser_has_trigger_tf_min_flag():
+    from orb.cli import build_parser
+
+    args = build_parser().parse_args(["live", "--smc-trigger-tf-min", "60"])
+    assert args.smc_trigger_tf_min == 60
+    d = build_parser().parse_args(["live"])
+    assert d.smc_trigger_tf_min is None
 
 
 def test_smc_broker_magic_server_tp_and_entry_mode():

@@ -22,6 +22,8 @@ log = logging.getLogger("orb.feeds.mt5")
 TIMEFRAME_M1 = 1  # mt5.TIMEFRAME_M1
 BAR_SECONDS = 60  # M1 bar period; used to time the poll to the bar boundary
 RECONNECT_AFTER = 3  # consecutive no-rate polls before re-initializing the IPC link
+STALE_MARKET_CLOSED_SEC = 15 * 3600  # last-bar age past which "no new bar" is a
+#                                      closed market (weekend), not a stalled link
 
 
 class Mt5FeedError(OrbError):
@@ -53,6 +55,7 @@ async def stream_candles(
     min_poll: float = 0.1,
     warmup_bars: int = 0,
     max_reconnect_attempts: int | None = None,
+    stale_reconnect_sec: float = 0.0,
 ):
     """Async generator of closed M1 Candles from the local MT5 terminal.
 
@@ -104,6 +107,9 @@ async def stream_candles(
     warmup_started: float | None = None
     warmup_catchup_done = False
     reconnect_fails = 0
+    # staleness watchdog: wall-clock of the last NEW closed bar (only tracked
+    # when armed, so the default path makes no extra now_fn() calls).
+    last_new_bar_ts = now_fn() if stale_reconnect_sec else 0.0
     while True:
         count = pending_warmup + 3 if pending_warmup else 3
         rates = mt5.copy_rates_from_pos(symbol, TIMEFRAME_M1, 0, count)
@@ -161,6 +167,8 @@ async def stream_candles(
             if last_emitted is not None and t <= last_emitted:
                 continue
             last_emitted = t
+            if stale_reconnect_sec:
+                last_new_bar_ts = now_fn()
             yield Candle(
                 ts=datetime.fromtimestamp(t - offset, tz=timezone.utc),
                 open=float(r["open"]), high=float(r["high"]),
@@ -176,6 +184,30 @@ async def stream_candles(
                 # them; last_emitted dedupes the overlap.
                 pending_warmup = int(elapsed // BAR_SECONDS) + 1
             warmup_started = None
+        # Staleness watchdog: a suspended terminal returns OLD bars with no
+        # error, so the no-rates reconnect never fires and the keeper sees a
+        # live proc. If no NEW closed bar arrived for stale_reconnect_sec while
+        # the last bar is recent enough that the market should be open (age <=
+        # STALE_MARKET_CLOSED_SEC, else it's a weekend/close and silence is
+        # expected), force a reconnect to refresh the link. Resetting the timer
+        # throttles this to at most one reconnect per interval and gives the
+        # fresh link a full interval before we would try again.
+        if (stale_reconnect_sec and offset is not None
+                and last_emitted is not None
+                and now_fn() - last_new_bar_ts > stale_reconnect_sec
+                and now_fn() - (last_emitted - offset) <= STALE_MARKET_CLOSED_SEC):
+            log.warning("stale_feed no new bar for %.0fs; reconnecting %s",
+                        now_fn() - last_new_bar_ts, symbol)
+            if _reconnect(mt5, symbol):
+                reconnect_fails = 0
+            else:
+                reconnect_fails += 1
+                if (max_reconnect_attempts is not None
+                        and reconnect_fails >= max_reconnect_attempts):
+                    raise Mt5FeedError(
+                        f"mt5 terminal stale + unreachable after "
+                        f"{reconnect_fails} reconnect attempts ({symbol})")
+            last_new_bar_ts = now_fn()
         # Adaptive sleep: time the next poll to the forming bar's close.
         # secs_into = how far into the current minute the forming bar is (broker
         # time = UTC + offset). Sleep most of the remaining time, but tighten to
@@ -188,23 +220,34 @@ async def stream_candles(
 
 
 def xauusd_live():
-    """Factory for the CLI --source flag."""
-    return stream_candles()
+    """CLI --source factory: gold native M1 feed.
+
+    warmup_bars/max_reconnect_attempts mirror btcusd_live: 30d M1 backfill arms
+    the SMC H4/D1 bias at launch (dormant otherwise) — MUST run with
+    --warmup-gate so replayed history cannot fire live orders; bounded
+    reconnects (3) exit the proc on a down terminal so the keeper respawns it
+    (D-032). Session instrument: 43200 M1 bars span ~6 calendar weeks.
+    """
+    return stream_candles(symbol="XAUUSD.ecn", warmup_bars=43200,
+                          max_reconnect_attempts=3, stale_reconnect_sec=3900.0)
 
 
 def us100_live():
-    """CLI --source factory: Nasdaq 100 native M1 feed."""
-    return stream_candles(symbol="US100.ecn")
+    """CLI --source factory: Nasdaq 100 native M1 feed. See xauusd_live re: warmup."""
+    return stream_candles(symbol="US100.ecn", warmup_bars=43200,
+                          max_reconnect_attempts=3, stale_reconnect_sec=3900.0)
 
 
 def us500_live():
-    """CLI --source factory: S&P 500 native M1 feed."""
-    return stream_candles(symbol="US500.ecn")
+    """CLI --source factory: S&P 500 native M1 feed. See xauusd_live re: warmup."""
+    return stream_candles(symbol="US500.ecn", warmup_bars=43200,
+                          max_reconnect_attempts=3, stale_reconnect_sec=3900.0)
 
 
 def xagusd_live():
-    """CLI --source factory: silver native M1 feed."""
-    return stream_candles(symbol="XAGUSD.ecn")
+    """CLI --source factory: silver native M1 feed. See xauusd_live re: warmup."""
+    return stream_candles(symbol="XAGUSD.ecn", warmup_bars=43200,
+                          max_reconnect_attempts=3, stale_reconnect_sec=3900.0)
 
 
 def btcusd_live():
@@ -216,4 +259,4 @@ def btcusd_live():
     terminal makes the bot exit instead of auto-recovering (owner choice).
     """
     return stream_candles(symbol="BTCUSD.ecn", warmup_bars=43200,
-                          max_reconnect_attempts=3)
+                          max_reconnect_attempts=3, stale_reconnect_sec=300.0)
