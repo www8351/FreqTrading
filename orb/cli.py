@@ -232,6 +232,7 @@ def build_smc_config(args) -> SmcConfig:
     setif("comm_per_lot", getattr(args, "smc_comm_per_lot", None))
     setif("stop_buffer", getattr(args, "smc_stop_buffer", None))
     setif("ticks_per_row", getattr(args, "smc_ticks_per_row", None))
+    setif("trigger_tf_min", getattr(args, "smc_trigger_tf_min", None))
     return SmcConfig(**base)
 
 
@@ -962,6 +963,9 @@ def _add_smc_flags(p) -> None:
     p.add_argument("--smc-ticks-per-row", dest="smc_ticks_per_row", type=int,
                    help="SMC volume-profile ticks per row (default 100 = $1 "
                         "rows on gold at tick 0.01; BTC ~3000 = $30 rows)")
+    p.add_argument("--smc-trigger-tf-min", dest="smc_trigger_tf_min", type=int,
+                   help="SMC trigger timeframe in minutes, must divide 1440 "
+                        "and be < htf (H4=240) (default 30)")
 
 
 def _add_common(p) -> None:
