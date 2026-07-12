@@ -1,6 +1,19 @@
 # STATUS
 
-## 2026-07-08 (latest) — silent stale-feed stall found + fixed (staleness watchdog, D-034)
+## 2026-07-12 (latest) — MQL5 EA un-parked + rebuilt to v2 (two-stage), compiles clean (D-035)
+- Owner wanted to run the EA in MT5. The tracked `.ex5` was a stale pre-two-stage binary; the `.mq5`
+  source had been removed (D-030). Owner chose to rebuild from Python first.
+- **Rebuilt `mql5/SmcXau_EA.mq5` to v2.00:** old BE/trail exits → **two-stage discrete SL** (ports
+  `orb/smc/exits.py`); added `InpTriggerTf` (default M30 = live XAUUSD); added `OriginalStopFromHistory`
+  (d from opening-order SL, D-029 fix); stage state inferred statelessly from the SL. Removed the
+  stale `.ex5` (source canonical; compile locally).
+- **Owner F7-compiled CLEAN, no errors** (I can't compile MQL5 here). Trade behavior NOT demo-tested.
+- **⚠️ Magic collision (open):** EA magic 20260621 == live Python XAUUSD SMC bot. Before the EA
+  trades XAUUSD, stop + drop XAUUSD from the Python keeper (one system per symbol). Not done yet —
+  Python XAUUSD bot still live, EA not attached.
+- Committed on a branch, PR opened. Python 5-bot fleet still running on demo (weekend, market closed).
+
+## 2026-07-08 — silent stale-feed stall found + fixed (staleness watchdog, D-034)
 - Owner flagged BTC should trade 24/7. Investigation: overnight ALL 5 bots went silent ~7h (engine
   logs frozen at the 20:30Z warmup instant) while a fresh MT5 query had CURRENT bars. Root cause:
   machine/terminal suspended → long-running feed connections returned stale-but-no-error bars; the
