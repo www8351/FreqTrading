@@ -977,9 +977,12 @@
     cannot recompile MQL5 here. Source is canonical; compile locally (F7). Binaries out of git.
 - **Verified:** owner **F7-compiled clean, no errors** (I cannot compile MQL5 in this environment).
   Trade behavior NOT demo-tested yet. Braces/parens balanced (96/96, 478/478).
-- **MAGIC COLLISION (unresolved until attach):** EA magic `20260621` == the live Python XAUUSD SMC
-  bot. Running both on XAUUSD makes them cross-manage each other's trades. Before the EA trades
-  XAUUSD, the Python XAUUSD bot must be stopped + dropped from the keeper `$ENABLED` (one system per
-  symbol). Not done yet — Python XAUUSD bot still live; EA not yet attached.
-- **Status:** Source committed, compiles clean. Behavior unvalidated; EA not live. Open choice
-  (per owner) of EA-vs-Python per symbol once demo-tested.
+- **MAGIC COLLISION — resolved on the Python side (2026-07-12):** EA magic `20260621` == the Python
+  XAUUSD SMC bot. Dropped XAUUSD from the keeper `$ENABLED` (commented for revert) + restarted; the
+  keeper now runs 4 (US100/US500/XAGUSD/BTC) and XAUUSD has zero Python procs/positions, so magic
+  20260621 on XAUUSD is free for the EA. The other 4 Python bots share magic 20260621 but on
+  different symbols — no collision (magic+symbol identifies). To move XAUUSD back to Python: stop the
+  EA and un-comment the XAUUSD `$ENABLED` block.
+- **Status:** Source committed, compiles clean; Python-side collision cleared. Still owner-side in the
+  MT5 GUI (I cannot drive it): attach the EA to an XAUUSD.ecn chart (`InpTriggerTf=PERIOD_M30`, Algo
+  Trading on, DEMO), optionally Strategy-Tester first. EA trade behavior remains un-demo-tested.

@@ -23,18 +23,20 @@ Set-Location $proj
 $TASK = 'ORB-Bots-Keeper'
 $STOP = Join-Path $proj 'STOP_TRADING'
 
-# ENABLED universe = all 5 on SMC (D-033). Trigger TF M15, XAUUSD M30.
+# ENABLED universe = 4 on SMC (Python). XAUUSD handed to the MQL5 EA (D-035) to
+# avoid a magic-20260621 collision (EA + Python bot would cross-manage the same
+# XAUUSD trades) -- DO NOT re-enable XAUUSD here while the EA runs on it.
 # Launched with NO --macro-mode (macro off). $smc = shared SMC flags.
 # Scale params (poc-tol/stop-buffer/stop-max-dist/ticks-per-row):
-#   XAUUSD = gold defaults (2/0.5/15/100). BTCUSD = tuned. US100/US500/XAGUSD =
-#   auto-derived by price ratio vs gold 4115 (UNTESTED - no backtest; D-020 flagged
-#   XAUUSD/silver/index as no-edge). comm-per-lot 0 everywhere (demo). Feeds backfill
-#   30d M1 so the SMC H4/D1 bias is armed at launch (all use --warmup-gate).
+#   BTCUSD = tuned. US100/US500/XAGUSD = auto-derived by price ratio vs gold 4115
+#   (UNTESTED - no backtest; D-020 flagged silver/index as no-edge). comm-per-lot 0
+#   everywhere (demo). Feeds backfill 30d M1 so the SMC bias is armed (all --warmup-gate).
 $smc = "--broker mt5 --strategy smc --warmup-gate --smc-comm-per-lot 0 --log-level INFO"
 $ENABLED = @(
-  @{ sym = 'XAUUSD.ecn'; out = 'live_xauusd_smc_signals.log'; err = 'live_xauusd_smc_engine.log';
-     args = "-m orb live --source orb.feeds.mt5feed:xauusd_live --symbol XAUUSD.ecn " +
-            "--smc-trigger-tf-min 30 $smc" },
+  # XAUUSD.ecn -> MQL5 EA (D-035). To move it back to Python, restore this and stop the EA:
+  # @{ sym = 'XAUUSD.ecn'; out = 'live_xauusd_smc_signals.log'; err = 'live_xauusd_smc_engine.log';
+  #    args = "-m orb live --source orb.feeds.mt5feed:xauusd_live --symbol XAUUSD.ecn " +
+  #           "--smc-trigger-tf-min 30 $smc" },
   @{ sym = 'US100.ecn'; out = 'live_us100_smc_signals.log'; err = 'live_us100_smc_engine.log';
      args = "-m orb live --source orb.feeds.mt5feed:us100_live --symbol US100.ecn " +
             "--smc-trigger-tf-min 15 --smc-poc-tol 14 --smc-stop-buffer 3.5 " +
