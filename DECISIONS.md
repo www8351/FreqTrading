@@ -986,3 +986,50 @@
 - **Status:** Source committed, compiles clean; Python-side collision cleared. Still owner-side in the
   MT5 GUI (I cannot drive it): attach the EA to an XAUUSD.ecn chart (`InpTriggerTf=PERIOD_M30`, Algo
   Trading on, DEMO), optionally Strategy-Tester first. EA trade behavior remains un-demo-tested.
+
+## D-036 (2026-07-12): clone the SMC EA to the other 4 symbols; retire the Python keeper
+- **Trigger:** owner: "do all bots like the XAUUSD bot — replace all 4 remaining Python bots with EAs."
+  Continues D-035 (XAUUSD → EA) for US100, US500, XAGUSD, BTCUSD. Goal: the whole SMC fleet on MQL5
+  EAs, Python keeper idle.
+- **Decision — clone 4 dedicated `.mq5` files** (not a shared `.mqh` engine): `SmcXau_EA.mq5` is a
+  symbol-agnostic 1:1 port (point/digits/tick-value resolved live from `_Symbol`/`SymbolInfoDouble`),
+  so each new EA is a byte-copy of it with ONLY the identity + input block changed. An `input` default
+  declared in an included `.mqh` cannot be overridden by the including `.mq5`, so the ".mqh + thin
+  wrappers" route would force hand-typing 6 values per chart and break the documented self-contained
+  invariant — clone wins. New files + magics (M15; scale = the D-033 bots.ps1 table):
+  - `mql5/SmcUs100_EA.mq5` magic 20260622 — poc 14 / buf 3.5 / max 105 / rows 700
+  - `mql5/SmcUs500_EA.mq5` magic 20260623 — poc 3.6 / buf 0.9 / max 27 / rows 180
+  - `mql5/SmcXag_EA.mq5`   magic 20260624 — poc 0.03 / buf 0.02 / max 0.4 / rows 3
+  - `mql5/SmcBtc_EA.mq5`   magic 20260625 — poc 60 / buf 40 / max 1500 / rows 3000
+  (`InpStage2Buffer = InpStopBuffer` per symbol. Everything else — risk 2%, partials 5R/7R/10R,
+  two-stage SL 1R/2R, min-conf 3, HTF H4/D1 — inherited from the XAU EA unchanged.)
+- **Distinct magics (22-25), not shared 20260621:** `CountTradesTodayFromHistory` filters the daily
+  deal count by DEAL_MAGIC ONLY (no symbol), so a shared magic would turn the per-symbol
+  `InpMaxTradesPerDay` cap into a shared cross-symbol cap. Distinct magics make it correct with ZERO
+  engine edits — each clone differs from `SmcXau_EA.mq5` on only its identity + input lines (proven by
+  `git diff --no-index`: changed lines = 2,3,6,8,30,40,46,47,58,59,65,66,75,90 only).
+- **SmcXau_EA.mq5 left UNTOUCHED (owner's call):** it keeps magic 20260621 and its magic-only
+  TradesToday. That bug is transient — historical 20260621 deals on the other 4 symbols (from today's
+  Python bots) would inflate the XAU EA's cap only for the current UTC day; once the Python bots stop,
+  only the XAU EA writes 20260621, so the count self-heals at the next UTC-day rollover. No recompile
+  of the proven EA needed.
+- **Keeper drained:** commented out all 4 remaining `$ENABLED` blocks in `scripts/bots.ps1` (like the
+  D-035 XAUUSD block) → `$ENABLED` is EMPTY; header updated. Owner runs `bots.ps1 off` to stop the 4
+  Python bots + idle the task (an empty `$ENABLED` under `restart`/`watch` keeps the task "ON" managing
+  nothing — `off` is the honest idle state).
+- **Orphaned-position caveat:** `bots.ps1 off` kills Python PROCS but not their open MT5 positions,
+  which carry magic 20260621; the new EAs (22-25) will NOT adopt them. Owner manually flats any open
+  US100/US500/XAGUSD/BTCUSD positions before attaching the EAs (weekend market-closed makes this easy).
+- **Drift control (clone sync rule):** each clone header names `SmcXau_EA.mq5` as the canonical engine.
+  Future engine edits are authored in `SmcXau_EA.mq5` and re-propagated; verify with the diff-guard
+  (only the input block + identity lines may differ). Revisit the `.mqh` route only if the engine
+  starts churning often.
+- **Validation UNCHANGED (still flagged):** this is a py→EA executor swap only — identical signals and
+  params. US100/US500/XAGUSD SMC configs remain UNVALIDATED price-ratio guesses (D-033) that contradict
+  D-020 (index/silver = no edge) and abandon the US100 ORB edge. Demo only; not live-money ready.
+- **Verified (programmatic):** diff-guard clean on all 4 clones; input values match the D-033 table;
+  `scripts/bots.ps1` AST-parses with 0 errors and `$ENABLED` empty; pytest green (no Python touched).
+- **Status:** Source committed on a branch, PR opened. Owner-side remaining in MT5 (I can't drive the
+  GUI): `bots.ps1 off` → flat any orphan positions → F7-compile the 4 new EAs (0/0) → attach each to
+  its `.ecn` M15 chart on DEMO, Algo Trading on → watch Journal for bias lines / Strategy-Tester first.
+  EA trade behavior un-demo-tested (same as the XAU EA).

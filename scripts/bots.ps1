@@ -1,5 +1,5 @@
 <#
-  bots.ps1 - SMC live-bot keeper + control. Enabled universe: all 5 on SMC (M15; XAUUSD M30).
+  bots.ps1 - SMC live-bot keeper + control. Enabled universe: EMPTY -- all 5 symbols handed to per-symbol MQL5 EAs (D-036).
   Supersedes scripts/watchdog.ps1 (do not run both - two keepers would duplicate bots).
 
   ON/OFF = the "ORB-Bots-Keeper" Scheduled Task state (Enabled = ON, Disabled = OFF).
@@ -23,9 +23,11 @@ Set-Location $proj
 $TASK = 'ORB-Bots-Keeper'
 $STOP = Join-Path $proj 'STOP_TRADING'
 
-# ENABLED universe = 4 on SMC (Python). XAUUSD handed to the MQL5 EA (D-035) to
-# avoid a magic-20260621 collision (EA + Python bot would cross-manage the same
-# XAUUSD trades) -- DO NOT re-enable XAUUSD here while the EA runs on it.
+# ENABLED universe = EMPTY. All 5 symbols now run on per-symbol MQL5 EAs (D-036):
+#   XAUUSD=SmcXau_EA(20260621,M30) US100=SmcUs100_EA(20260622) US500=SmcUs500_EA(20260623)
+#   XAGUSD=SmcXag_EA(20260624) BTCUSD=SmcBtc_EA(20260625) -- last 4 M15 (D-035 handoff pattern).
+# NEVER run a Python bot + its EA on the same symbol (magic+symbol collision, cross-management).
+# To move any symbol back to Python: un-comment its block below + stop that EA, then: bots.ps1 restart
 # Launched with NO --macro-mode (macro off). $smc = shared SMC flags.
 # Scale params (poc-tol/stop-buffer/stop-max-dist/ticks-per-row):
 #   BTCUSD = tuned. US100/US500/XAGUSD = auto-derived by price ratio vs gold 4115
@@ -33,26 +35,33 @@ $STOP = Join-Path $proj 'STOP_TRADING'
 #   everywhere (demo). Feeds backfill 30d M1 so the SMC bias is armed (all --warmup-gate).
 $smc = "--broker mt5 --strategy smc --warmup-gate --smc-comm-per-lot 0 --log-level INFO"
 $ENABLED = @(
-  # XAUUSD.ecn -> MQL5 EA (D-035). To move it back to Python, restore this and stop the EA:
+  # ALL blocks commented -> $ENABLED is EMPTY (every symbol is on its MQL5 EA, D-036).
+  # Un-comment a block + stop that symbol's EA to move it back to Python, then: bots.ps1 restart
+  #
+  # XAUUSD.ecn -> MQL5 EA SmcXau_EA (D-035, magic 20260621), M30:
   # @{ sym = 'XAUUSD.ecn'; out = 'live_xauusd_smc_signals.log'; err = 'live_xauusd_smc_engine.log';
   #    args = "-m orb live --source orb.feeds.mt5feed:xauusd_live --symbol XAUUSD.ecn " +
   #           "--smc-trigger-tf-min 30 $smc" },
-  @{ sym = 'US100.ecn'; out = 'live_us100_smc_signals.log'; err = 'live_us100_smc_engine.log';
-     args = "-m orb live --source orb.feeds.mt5feed:us100_live --symbol US100.ecn " +
-            "--smc-trigger-tf-min 15 --smc-poc-tol 14 --smc-stop-buffer 3.5 " +
-            "--smc-stop-max-dist 105 --smc-ticks-per-row 700 $smc" },
-  @{ sym = 'US500.ecn'; out = 'live_us500_smc_signals.log'; err = 'live_us500_smc_engine.log';
-     args = "-m orb live --source orb.feeds.mt5feed:us500_live --symbol US500.ecn " +
-            "--smc-trigger-tf-min 15 --smc-poc-tol 3.6 --smc-stop-buffer 0.9 " +
-            "--smc-stop-max-dist 27 --smc-ticks-per-row 180 $smc" },
-  @{ sym = 'XAGUSD.ecn'; out = 'live_xagusd_smc_signals.log'; err = 'live_xagusd_smc_engine.log';
-     args = "-m orb live --source orb.feeds.mt5feed:xagusd_live --symbol XAGUSD.ecn " +
-            "--smc-trigger-tf-min 15 --smc-poc-tol 0.03 --smc-stop-buffer 0.02 " +
-            "--smc-stop-max-dist 0.4 --smc-ticks-per-row 3 $smc" },
-  @{ sym = 'BTCUSD.ecn'; out = 'live_btcusd_smc_signals.log'; err = 'live_btcusd_smc_engine.log';
-     args = "-m orb live --source orb.feeds.mt5feed:btcusd_live --symbol BTCUSD.ecn " +
-            "--smc-trigger-tf-min 15 --smc-poc-tol 60 --smc-stop-buffer 40 " +
-            "--smc-stop-max-dist 1500 --smc-ticks-per-row 3000 $smc" }
+  # US100.ecn -> MQL5 EA SmcUs100_EA (D-036, magic 20260622), M15:
+  # @{ sym = 'US100.ecn'; out = 'live_us100_smc_signals.log'; err = 'live_us100_smc_engine.log';
+  #    args = "-m orb live --source orb.feeds.mt5feed:us100_live --symbol US100.ecn " +
+  #           "--smc-trigger-tf-min 15 --smc-poc-tol 14 --smc-stop-buffer 3.5 " +
+  #           "--smc-stop-max-dist 105 --smc-ticks-per-row 700 $smc" },
+  # US500.ecn -> MQL5 EA SmcUs500_EA (D-036, magic 20260623), M15:
+  # @{ sym = 'US500.ecn'; out = 'live_us500_smc_signals.log'; err = 'live_us500_smc_engine.log';
+  #    args = "-m orb live --source orb.feeds.mt5feed:us500_live --symbol US500.ecn " +
+  #           "--smc-trigger-tf-min 15 --smc-poc-tol 3.6 --smc-stop-buffer 0.9 " +
+  #           "--smc-stop-max-dist 27 --smc-ticks-per-row 180 $smc" },
+  # XAGUSD.ecn -> MQL5 EA SmcXag_EA (D-036, magic 20260624), M15:
+  # @{ sym = 'XAGUSD.ecn'; out = 'live_xagusd_smc_signals.log'; err = 'live_xagusd_smc_engine.log';
+  #    args = "-m orb live --source orb.feeds.mt5feed:xagusd_live --symbol XAGUSD.ecn " +
+  #           "--smc-trigger-tf-min 15 --smc-poc-tol 0.03 --smc-stop-buffer 0.02 " +
+  #           "--smc-stop-max-dist 0.4 --smc-ticks-per-row 3 $smc" },
+  # BTCUSD.ecn -> MQL5 EA SmcBtc_EA (D-036, magic 20260625), M15:
+  # @{ sym = 'BTCUSD.ecn'; out = 'live_btcusd_smc_signals.log'; err = 'live_btcusd_smc_engine.log';
+  #    args = "-m orb live --source orb.feeds.mt5feed:btcusd_live --symbol BTCUSD.ecn " +
+  #           "--smc-trigger-tf-min 15 --smc-poc-tol 60 --smc-stop-buffer 40 " +
+  #           "--smc-stop-max-dist 1500 --smc-ticks-per-row 3000 $smc" }
 )
 
 function Get-OrbProcs {
