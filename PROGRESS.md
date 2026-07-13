@@ -1,6 +1,25 @@
 # PROGRESS
 
-## 2026-07-12 (latest) — Rebuilt the MQL5 EA to v2 (two-stage) matching current Python (D-035)
+## 2026-07-12 (latest) — Cloned the SMC EA to the other 4 symbols; drained the Python keeper (D-036)
+- Owner: replace all 4 remaining Python SMC bots (US100/US500/XAGUSD/BTCUSD) with per-symbol MQL5 EAs,
+  like the XAUUSD EA. Explored (3 agents): `SmcXau_EA.mq5` is a symbol-agnostic 1:1 port — only 5 knobs
+  differ per symbol (trigger TF + poc-tol/stop-buffer/stop-max-dist/ticks-per-row), all already in the
+  D-033 bots.ps1 table; point/digits/tick-value resolve live from `_Symbol`.
+- **Cloned** the EA to `SmcUs100_EA.mq5`/`SmcUs500_EA.mq5`/`SmcXag_EA.mq5`/`SmcBtc_EA.mq5` via byte-copy
+  + edits to ONLY identity lines (2,3,6,8,30) and input lines (40,46,47,58,59,65,66,75,90). Distinct
+  magics 20260622-25, all M15, scale from the D-033 table, `InpStage2Buffer=InpStopBuffer`.
+- **Chose distinct magics over shared 20260621** — `CountTradesTodayFromHistory` counts by magic only,
+  so shared magic would share the daily-trade cap across symbols; distinct magics fix it with no engine
+  edit. Left `SmcXau_EA.mq5` untouched (owner's call; its magic-only cap self-heals next UTC day).
+- **Rejected a shared `.mqh` engine** — MQL5 can't override an `input` default from an include, so the
+  clones' attach-and-go defaults would be lost. Clone + a documented sync/diff-guard rule instead.
+- **Drained `scripts/bots.ps1`** — commented out all 4 `$ENABLED` blocks (empty array), updated header.
+- **Verified:** `git diff --no-index` shows each clone differs only on the intended lines; input values
+  match the table; bots.ps1 AST-parses (0 errors), `$ENABLED` empty; pytest green (no Python changed).
+- Handed off owner-manual MT5 steps (off → flat orphans → F7 compile 4 → attach M15/DEMO). Committed on
+  a branch, PR opened. EA trade behavior still un-demo-tested.
+
+## 2026-07-12 — Rebuilt the MQL5 EA to v2 (two-stage) matching current Python (D-035)
 - Owner started MT5 and wanted to run the SMC EA. Found: tracked `mql5/SmcXau_EA.ex5` is a STALE
   binary (pre-two-stage) and the `.mq5` source was removed (9dcde1f, "parked per D-030"). Flagged the
   magic-20260621 collision with the live Python XAUUSD bot. Owner chose "rebuild EA from Python first."

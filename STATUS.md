@@ -1,6 +1,23 @@
 # STATUS
 
-## 2026-07-12 (latest) — MQL5 EA un-parked + rebuilt to v2 (two-stage), compiles clean (D-035)
+## 2026-07-12 (latest) — Whole SMC fleet moved to MQL5 EAs; Python keeper retired (D-036)
+- Owner: "do all bots like the XAUUSD bot — replace all 4 remaining Python bots (US100/US500/XAGUSD/
+  BTCUSD) with EAs." Continues D-035 (XAUUSD→EA) to the rest.
+- **Cloned `SmcXau_EA.mq5` → 4 dedicated EAs** (symbol-agnostic engine; only identity+input block
+  differs, diff-guard clean): `SmcUs100_EA`(20260622) `SmcUs500_EA`(20260623) `SmcXag_EA`(20260624)
+  `SmcBtc_EA`(20260625), all M15, scale = D-033 table. Distinct magics keep the per-symbol daily-trade
+  cap correct (TradesToday is magic-only) with zero engine edits. `SmcXau_EA.mq5` left untouched.
+- **Keeper drained:** all 4 `$ENABLED` blocks commented out (revert = un-comment); `$ENABLED` empty,
+  AST-parses clean. Owner runs `bots.ps1 off` to stop the 4 Python bots + idle the task.
+- **Remaining (owner, MT5 GUI — I can't drive it):** `bots.ps1 off` → manually flat any open
+  US100/US500/XAGUSD/BTCUSD positions (they carry magic 20260621; new EAs use 22-25, won't adopt them)
+  → F7-compile the 4 new EAs (expect 0/0) → attach each to its `.ecn` M15 chart, DEMO, Algo Trading on
+  → watch Journal / Strategy-Tester first. Market reopens Sun evening.
+- **Fleet after cutover:** 5 per-symbol MQL5 EAs (XAUUSD M30 + 4×M15), magics 20260621-25; 0 Python
+  bots. Validation UNCHANGED — same unvalidated SMC signals, just EA-executed (D-033/D-020 risk stands).
+- Committed on a branch, PR opened. Programmatic checks green (diff-guard, inputs, keeper parse, pytest).
+
+## 2026-07-12 — MQL5 EA un-parked + rebuilt to v2 (two-stage), compiles clean (D-035)
 - Owner wanted to run the EA in MT5. The tracked `.ex5` was a stale pre-two-stage binary; the `.mq5`
   source had been removed (D-030). Owner chose to rebuild from Python first.
 - **Rebuilt `mql5/SmcXau_EA.mq5` to v2.00:** old BE/trail exits → **two-stage discrete SL** (ports
@@ -8,10 +25,13 @@
   (d from opening-order SL, D-029 fix); stage state inferred statelessly from the SL. Removed the
   stale `.ex5` (source canonical; compile locally).
 - **Owner F7-compiled CLEAN, no errors** (I can't compile MQL5 here). Trade behavior NOT demo-tested.
-- **⚠️ Magic collision (open):** EA magic 20260621 == live Python XAUUSD SMC bot. Before the EA
-  trades XAUUSD, stop + drop XAUUSD from the Python keeper (one system per symbol). Not done yet —
-  Python XAUUSD bot still live, EA not attached.
-- Committed on a branch, PR opened. Python 5-bot fleet still running on demo (weekend, market closed).
+- **Magic collision RESOLVED (Python side):** dropped XAUUSD from the keeper `$ENABLED` (commented
+  for easy revert) + restarted — keeper now runs 4 (US100/US500/XAGUSD/BTC, 8 procs), XAUUSD has 0
+  Python procs / 0 positions. XAUUSD magic 20260621 is now free for the EA.
+- **Remaining (owner, in MT5 GUI — I can't drive it):** attach `SmcXau_EA` to an XAUUSD.ecn chart,
+  `InpTriggerTf=PERIOD_M30`, enable Algo Trading, DEMO. Optionally Strategy-Tester first. Market
+  reopens Sun evening. EA behavior still un-demo-tested.
+- Committed on a branch, PR #10. Other 4 Python bots running on demo (weekend, market closed).
 
 ## 2026-07-08 — silent stale-feed stall found + fixed (staleness watchdog, D-034)
 - Owner flagged BTC should trade 24/7. Investigation: overnight ALL 5 bots went silent ~7h (engine

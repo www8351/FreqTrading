@@ -347,33 +347,47 @@ breaker (`--max-daily-loss`) is mandatory risk protection, not optional.
 
 <tr><td width="50%" valign="top">
 
-### 🇬🇧 Optional — MQL5 EA (SMC engine, copy-trading master)
+### 🇬🇧 Optional — MQL5 EA fleet (SMC engine, 5 per-symbol EAs, copy-trading masters)
 
 </td><td width="50%" valign="top">
 
 <div dir="rtl">
 
-### 🇮🇱 אופציונלי — EA ב-MQL5 (מנוע SMC, חשבון מאסטר להעתקת מסחר)
+### 🇮🇱 אופציונלי — צי EA ב-MQL5 (מנוע SMC, 5 EA לכל סימבול, חשבונות מאסטר)
 
 </div>
 
 </td></tr>
 <tr><td colspan="2">
 
-1. Copy `mql5/SmcXau_EA.mq5` into the terminal's `MQL5/Experts/` folder.
-2. Open **MetaEditor**, open the file, press **F7** — expect `0 errors, 0 warnings`.
-3. Attach it to an **XAUUSD.ecn M15** chart on a **demo** account; confirm Algo
-   Trading is enabled.
-4. Watch the Experts/Journal tab for bias + confluence log lines on each M15 close.
-5. Run a **Strategy Tester** pass (M1, real ticks) before pointing any copy-trade
-   master account at it.
+The SMC engine ships as **5 self-contained EAs — one per symbol** (identical engine; only
+the input block differs, see **D-036**). Attach each to its own chart on a **demo** account:
+
+| EA file | Symbol | Chart TF | Magic |
+|---|---|---|---|
+| `mql5/SmcXau_EA.mq5`   | XAUUSD | M30 | 20260621 |
+| `mql5/SmcUs100_EA.mq5` | US100  | M15 | 20260622 |
+| `mql5/SmcUs500_EA.mq5` | US500  | M15 | 20260623 |
+| `mql5/SmcXag_EA.mq5`   | XAGUSD | M15 | 20260624 |
+| `mql5/SmcBtc_EA.mq5`   | BTCUSD | M15 | 20260625 |
+
+1. Copy the `mql5/Smc*_EA.mq5` files into the terminal's `MQL5/Experts/` folder.
+2. Open **MetaEditor** and press **F7** on each — expect `0 errors, 0 warnings`.
+3. Attach each EA to its symbol's `.ecn` chart at the TF above, on a **demo** account; confirm
+   Algo Trading is enabled. **Never run a Python bot and its EA on the same symbol.**
+4. Watch the Experts/Journal tab for bias + confluence log lines on each bar close.
+5. Run a **Strategy Tester** pass (M1, real ticks) before pointing any copy-trade master at it.
 
 <div dir="rtl">
 
-1. העתיקו את `mql5/SmcXau_EA.mq5` לתיקיית `MQL5/Experts/` של הטרמינל.
-2. פתחו את **MetaEditor**, פתחו את הקובץ, לחצו **F7** — יש לצפות ל-"0 errors, 0 warnings".
-3. חברו אותו לגרף **XAUUSD.ecn בטווח M15** בחשבון **דמו**; ודאו ש-Algo Trading פעיל.
-4. עקבו אחרי לשונית ה-Journal לשורות לוג של הטיה ומיזוגים (confluence) בכל סגירת M15.
+מנוע ה-SMC מסופק כ-**5 EA עצמאיים — אחד לכל סימבול** (מנוע זהה; רק בלוק ה-input שונה, ראו **D-036**).
+חברו כל אחד לגרף שלו בחשבון **דמו** (טבלת הקבצים/סימבולים/טווח/magic למעלה):
+
+1. העתיקו את קבצי `mql5/Smc*_EA.mq5` לתיקיית `MQL5/Experts/` של הטרמינל.
+2. פתחו את **MetaEditor** ולחצו **F7** על כל אחד — יש לצפות ל-"0 errors, 0 warnings".
+3. חברו כל EA לגרף ה-`.ecn` של הסימבול שלו בטווח שלמעלה, בחשבון **דמו**; ודאו ש-Algo Trading פעיל.
+   **לעולם אל תריצו בוט פייתון וה-EA שלו על אותו סימבול.**
+4. עקבו אחרי לשונית ה-Journal לשורות לוג של הטיה ומיזוגים (confluence) בכל סגירת נר.
 5. הריצו **Strategy Tester** (M1, טיקים אמיתיים) לפני חיבור כל חשבון מאסטר להעתקת מסחר.
 
 </div>
@@ -413,7 +427,7 @@ graph TD
     MAC["🌐 macro/ sidecar<br/>macro_state.json"] -.veto/scale.-> MG["macroguard.py"] -.-> E
     SVP["📊 svp/ (research)"] -.parallel.-> S
     SMC["🎯 smc/ (research)"] -.parallel.-> S
-    SMC -.port.-> EA["🖥️ mql5/SmcXau_EA.mq5"]
+    SMC -.port.-> EA["🖥️ mql5/ — 5 per-symbol EAs"]
     S --> AN["📈 analytics.py<br/>+ scripts/live_report.py"]
 ```
 
@@ -523,8 +537,9 @@ Live on `US100.ecn`, magic `20260611`.
 Managed under a 5-file lifecycle protocol (`CLAUDE.md`): `README.md` (overview) ·
 `STATUS.md` (current state) · `PROGRESS.md` (timeline) · `DECISIONS.md` (decision log) ·
 `CLAUDE_MEMORY.md` (AI rules). Strategy spec lives in `STRATEGY.md`; Pine sources in
-`AMD_pro_v1.pine`, `Ture_Open_Price.pine`. The MQL5 Expert Advisor port of the SMC engine
-(`mql5/SmcXau_EA.mq5`) is self-contained — copy into a terminal's `MQL5/Experts/` and compile.
+`AMD_pro_v1.pine`, `Ture_Open_Price.pine`. The MQL5 Expert Advisor port of the SMC engine ships
+as **5 self-contained per-symbol EAs** (`mql5/Smc*_EA.mq5`, one per symbol) — copy into a
+terminal's `MQL5/Experts/` and compile.
 
 </details>
 

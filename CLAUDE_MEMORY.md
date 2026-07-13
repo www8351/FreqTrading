@@ -33,6 +33,19 @@
 - Live safety stack is mandatory in any new run mode: capped+re-anchored SL,
   server-side trail sync, force_flat broker sync, daily loss breaker, demo guard.
 
+## Live execution (MQL5 EA fleet — D-035/D-036)
+- The SMC strategy runs LIVE as 5 self-contained per-symbol MQL5 EAs, not the Python keeper:
+  XAUUSD=`SmcXau_EA`(magic 20260621, M30) · US100=`SmcUs100_EA`(20260622) · US500=`SmcUs500_EA`(20260623)
+  · XAGUSD=`SmcXag_EA`(20260624) · BTCUSD=`SmcBtc_EA`(20260625) — the last 4 on M15. Other strategy
+  magics: SVP 20260620, ORB 20260610.
+- **One system per symbol (hard rule):** NEVER run a Python bot and an EA on the same symbol — they
+  share (magic+symbol) identity and would cross-manage each other's trades. `scripts/bots.ps1`
+  `$ENABLED` is EMPTY (every symbol is on an EA); to move one back to Python, un-comment its block AND
+  stop that EA first.
+- The EA engine is canonical in `SmcXau_EA.mq5`; the 4 clones differ ONLY in their input block (author
+  engine edits there, re-propagate, verify with the `git diff --no-index` diff-guard). `.ex5` binaries
+  stay out of git; compile via MetaEditor F7 locally.
+
 ## Coding style
 - Direct, cold, technical. Compact docstrings. CLI output single-line,
   pipe-delimited key=val; signals->stdout, diagnostics->stderr.
